@@ -23,6 +23,10 @@ protected:
   bool     gps_active = false;
   uint32_t gps_update_interval_sec = 1;
 
+  #if ENV_INCLUDE_TSL2591
+  bool _tsl2591_active = false;   // TSL2591 luminosity present (reported on SELF channel)
+  #endif
+
   #if ENV_INCLUDE_GPS
   LocationProvider* _location;
   void start_gps();

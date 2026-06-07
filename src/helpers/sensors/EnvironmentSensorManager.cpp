@@ -91,6 +91,13 @@ static Adafruit_SHTC3 SHTC3;
 static SensirionI2cSht4x SHT4X;
 #endif
 
+#if ENV_INCLUDE_TSL2591
+// TSL2591 high-dynamic-range light sensor (fixed I2C address 0x29).
+// Reported on the SELF channel as Luminosity (like the T1000-E light sensor).
+#include <Adafruit_TSL2591.h>
+static Adafruit_TSL2591 TSL2591 = Adafruit_TSL2591(2591);
+#endif
+
 #if ENV_INCLUDE_LPS22HB
 #include <Arduino_LPS22HB.h>
 LPS22HBClass LPS22HB(*TELEM_WIRE);
@@ -324,9 +331,18 @@ static uint8_t init_sht4x(TwoWire* wire, uint8_t addr) {
 }
 static void query_sht4x(uint8_t ch, uint8_t, CayenneLPP& lpp) {
   float temperature, humidity;
-  if (SHT4X.measureLowestPrecision(temperature, humidity) == 0) {
-    lpp.addTemperature(ch, temperature);
-    lpp.addRelativeHumidity(ch, humidity);
+  // High precision. The Sensirion lib waits delay(10)ms internally, which is
+  // above the 8.3 ms max high-precision conversion time, so the conversion is
+  // always given enough time. The remaining failure mode is a transient
+  // CRC/I2C error (noise over the long external-sensor cable), reported as a
+  // non-zero return — retry a few times so one bad read doesn't drop the sample.
+  for (int attempt = 0; attempt < 3; attempt++) {
+    if (SHT4X.measureHighPrecision(temperature, humidity) == 0) {
+      lpp.addTemperature(ch, temperature);
+      lpp.addRelativeHumidity(ch, humidity);
+      return;
+    }
+    delay(5);  // brief settle before re-issuing the measurement
   }
 }
 #endif
@@ -431,6 +447,66 @@ static void query_vl53l0x(uint8_t ch, uint8_t, CayenneLPP& lpp) {
   VL53L0X_RangingMeasurementData_t measure;
   VL53L0X.rangingTest(&measure, false);
   lpp.addDistance(ch, measure.RangeStatus != 4 ? measure.RangeMilliMeter / 1000.0f : 0.0f);
+}
+#endif
+
+#if ENV_INCLUDE_TSL2591
+// Auto-ranging TSL2591 driver tuned for the full outdoor dynamic range
+// (starlight ~0.01 lux up to bright daylight). Gain is stepped automatically so
+// the ADC is always well-used (best resolution) without saturating. Integration
+// is fixed at 100 ms: it keeps the telemetry-reply read fast and gives daylight
+// headroom (the 100 ms full-scale count is 36863). NOT placed in SENSOR_TABLE —
+// it is reported on the SELF channel (channel 1), so it is handled specially in
+// begin()/querySensors() like GPS.
+static const tsl2591Gain_t TSL_GAINS[] = {
+  TSL2591_GAIN_LOW,   // 1x   — bright daylight
+  TSL2591_GAIN_MED,   // 25x
+  TSL2591_GAIN_HIGH,  // 428x
+  TSL2591_GAIN_MAX    // 9876x — near-darkness
+};
+static const uint8_t TSL_GAIN_COUNT = sizeof(TSL_GAINS) / sizeof(TSL_GAINS[0]);
+static uint8_t tsl_gain_idx = 0;  // persists across reads; starts daylight-safe
+
+static bool init_tsl2591(TwoWire* wire) {
+  if (!TSL2591.begin(wire)) return false;
+  tsl_gain_idx = 0;
+  TSL2591.setGain(TSL_GAINS[tsl_gain_idx]);
+  TSL2591.setTiming(TSL2591_INTEGRATIONTIME_100MS);
+  return true;
+}
+
+// Returns lux. Auto-ranges gain downward (re-reading) when saturated so a bright
+// reading is always accurate; ranges upward lazily (next call) when dim. Steady
+// state is a single 100 ms read; only a large brightness jump costs extra reads.
+static float tsl2591_read_lux() {
+  const uint16_t SAT = 36863;          // 100 ms full-scale ADC count
+  const float    LUX_CEIL = 88000.0f;  // ~max measurable at 1x/100 ms
+
+  for (uint8_t attempt = 0; attempt < TSL_GAIN_COUNT; attempt++) {
+    uint32_t lum  = TSL2591.getFullLuminosity();  // blocks ~100 ms
+    uint16_t full = lum & 0xFFFF;
+    uint16_t ir   = lum >> 16;
+
+    bool saturated = (full >= SAT);
+    float lux = saturated ? -1.0f : TSL2591.calculateLux(full, ir);
+
+    if (lux < 0.0f) {  // saturated / library overflow → reduce gain and re-read
+      if (tsl_gain_idx > 0) {
+        tsl_gain_idx--;
+        TSL2591.setGain(TSL_GAINS[tsl_gain_idx]);
+        continue;
+      }
+      return LUX_CEIL;  // already at min gain — clamp to the ceiling
+    }
+
+    // Valid reading. If very dim, bump gain for the NEXT read (more resolution).
+    if (full < 100 && tsl_gain_idx < TSL_GAIN_COUNT - 1) {
+      tsl_gain_idx++;
+      TSL2591.setGain(TSL_GAINS[tsl_gain_idx]);
+    }
+    return lux;
+  }
+  return 0.0f;
 }
 #endif
 
@@ -555,6 +631,12 @@ static const SensorDef SENSOR_TABLE[] = {
 #if ENV_INCLUDE_AHTX0
   { TELEM_AHTX_ADDRESS,    "AHT10/AHT20", init_ahtx0,    query_ahtx0    },
 #endif
+// SHT4X is placed before BME680 so the dedicated temp/humidity sensor takes the
+// lower channel: with this Muninn build (SHT45 + BME680 + INA3221) the channel
+// layout is ch2=SHT45, ch3=BME680, ch4-6=INA3221.
+#if ENV_INCLUDE_SHT4X
+  { TELEM_SHT4X_ADDRESS,   "SHT4X",        init_sht4x,    query_sht4x    },
+#endif
 #ifdef ENV_INCLUDE_BME680
   { TELEM_BME680_ADDRESS,  "BME680",       init_bme680,   query_bme680   },
 #endif
@@ -569,9 +651,6 @@ static const SensorDef SENSOR_TABLE[] = {
 #endif
 #if ENV_INCLUDE_SHTC3
   { 0x70,                  "SHTC3",        init_shtc3,    query_shtc3    },
-#endif
-#if ENV_INCLUDE_SHT4X
-  { TELEM_SHT4X_ADDRESS,   "SHT4X",        init_sht4x,    query_sht4x    },
 #endif
 #if ENV_INCLUDE_LPS22HB
   { 0x5C,                  "LPS22HB",      init_lps22hb,  query_lps22hb  },
@@ -655,6 +734,17 @@ bool EnvironmentSensorManager::begin() {
     }
   }
 
+  // TSL2591 (fixed address 0x29) is reported on the SELF channel, not as a
+  // sequential table sensor, so it is detected and initialised separately.
+  #if ENV_INCLUDE_TSL2591
+  if (detected[0x29] && init_tsl2591(TELEM_WIRE)) {
+    _tsl2591_active = true;
+    MESH_DEBUG_PRINTLN("Found TSL2591 at address: 29");
+  } else {
+    MESH_DEBUG_PRINTLN("TSL2591 not detected at I2C address 29");
+  }
+  #endif
+
   return true;
 }
 
@@ -672,6 +762,17 @@ bool EnvironmentSensorManager::querySensors(uint8_t requester_permissions, Cayen
   }
 
   if (requester_permissions & TELEM_PERM_ENVIRONMENT) {
+    // TSL2591 luminosity goes on the SELF channel (ch1), alongside battery and
+    // MCU temperature. LPP Luminosity is an unsigned 2-byte field (max 65535
+    // lux), so clamp — direct full sun (>65535 lux) reads as 65535.
+    #if ENV_INCLUDE_TSL2591
+    if (_tsl2591_active) {
+      float lux = tsl2591_read_lux();
+      if (lux > 65535.0f) lux = 65535.0f;
+      telemetry.addLuminosity(TELEM_CHANNEL_SELF, (uint32_t)(lux + 0.5f));
+    }
+    #endif
+
     for (int i = 0; i < _active_sensor_count; i++) {
       _active_sensors[i].query(next_available_channel, _active_sensors[i].sub_channel, telemetry);
       next_available_channel++;
