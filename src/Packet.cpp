@@ -8,6 +8,7 @@ Packet::Packet() {
   header = 0;
   path_len = 0;
   payload_len = 0;
+  _tx_power = PACKET_TX_POWER_DEFAULT;
 }
 
 bool Packet::isValidPathLen(uint8_t path_len) {

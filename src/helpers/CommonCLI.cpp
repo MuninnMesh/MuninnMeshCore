@@ -91,7 +91,9 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     file.read((uint8_t *)&_prefs->rx_boosted_gain, sizeof(_prefs->rx_boosted_gain));              // 290
     file.read((uint8_t *)&_prefs->flood_max_unscoped, sizeof(_prefs->flood_max_unscoped));   // 291
     file.read((uint8_t *)&_prefs->flood_max_advert, sizeof(_prefs->flood_max_advert));       // 292
-    // next: 293
+    file.read((uint8_t *)&_prefs->telem_reply_zerohop, sizeof(_prefs->telem_reply_zerohop));     // 293
+    file.read((uint8_t *)&_prefs->telem_reply_power_dbm, sizeof(_prefs->telem_reply_power_dbm)); // 294
+    // next: 295
 
     // sanitise bad pref values
     _prefs->rx_delay_base = constrain(_prefs->rx_delay_base, 0, 20.0f);
@@ -121,6 +123,7 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
 
     // sanitise settings
     _prefs->rx_boosted_gain = constrain(_prefs->rx_boosted_gain, 0, 1); // boolean
+    _prefs->telem_reply_zerohop = constrain(_prefs->telem_reply_zerohop, 0, 1); // boolean
 
     file.close();
   }
@@ -184,7 +187,9 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
     file.write((uint8_t *)&_prefs->rx_boosted_gain, sizeof(_prefs->rx_boosted_gain));              // 290
     file.write((uint8_t *)&_prefs->flood_max_unscoped, sizeof(_prefs->flood_max_unscoped));   // 291
     file.write((uint8_t *)&_prefs->flood_max_advert, sizeof(_prefs->flood_max_advert));       // 292
-    // next: 293
+    file.write((uint8_t *)&_prefs->telem_reply_zerohop, sizeof(_prefs->telem_reply_zerohop));     // 293
+    file.write((uint8_t *)&_prefs->telem_reply_power_dbm, sizeof(_prefs->telem_reply_power_dbm)); // 294
+    // next: 295
 
     file.close();
   }
@@ -508,6 +513,19 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     _prefs->multi_acks = atoi(&config[11]);
     savePrefs();
     strcpy(reply, "OK");
+  } else if (memcmp(config, "telem.reply.zerohop ", 20) == 0) {
+    _prefs->telem_reply_zerohop = (memcmp(&config[20], "on", 2) == 0) ? 1 : 0;
+    savePrefs();
+    strcpy(reply, "OK");
+  } else if (memcmp(config, "telem.reply.power ", 18) == 0) {
+    const char* v = &config[18];
+    if (memcmp(v, "off", 3) == 0) {
+      _prefs->telem_reply_power_dbm = TELEM_REPLY_POWER_UNSET;
+    } else {
+      _prefs->telem_reply_power_dbm = (int8_t)atoi(v);
+    }
+    savePrefs();
+    strcpy(reply, "OK");
   } else if (memcmp(config, "allow.read.only ", 16) == 0) {
     _prefs->allow_read_only = memcmp(&config[16], "on", 2) == 0;
     savePrefs();
@@ -780,6 +798,14 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     sprintf(reply, "> %d", ((uint32_t) _prefs->agc_reset_interval) * 4);
   } else if (memcmp(config, "multi.acks", 10) == 0) {
     sprintf(reply, "> %d", (uint32_t) _prefs->multi_acks);
+  } else if (memcmp(config, "telem.reply.zerohop", 19) == 0) {
+    sprintf(reply, "> %s", _prefs->telem_reply_zerohop ? "on" : "off");
+  } else if (memcmp(config, "telem.reply.power", 17) == 0) {
+    if (_prefs->telem_reply_power_dbm == TELEM_REPLY_POWER_UNSET) {
+      strcpy(reply, "> off");
+    } else {
+      sprintf(reply, "> %d", (int32_t)_prefs->telem_reply_power_dbm);
+    }
   } else if (memcmp(config, "allow.read.only", 15) == 0) {
     sprintf(reply, "> %s", _prefs->allow_read_only ? "on" : "off");
   } else if (memcmp(config, "flood.advert.interval", 21) == 0) {

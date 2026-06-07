@@ -41,6 +41,10 @@
   #define TXT_ACK_DELAY 200
 #endif
 
+#ifndef TELEM_REPLY_ZEROHOP_DEFAULT
+  #define TELEM_REPLY_ZEROHOP_DEFAULT 0
+#endif
+
 #define FIRMWARE_VER_LEVEL       2
 
 #define REQ_TYPE_GET_STATUS         0x01 // same as _GET_STATS
@@ -59,6 +63,10 @@
 #define CLI_REPLY_DELAY_MILLIS      600
 
 #define LAZY_CONTACTS_WRITE_DELAY    5000
+
+static void setRepeaterTxPower(int8_t power_dbm) {
+  radio_driver.setTxPower(power_dbm);
+}
 
 void MyMesh::putNeighbour(const mesh::Identity &id, uint32_t timestamp, float snr) {
 #if MAX_NEIGHBOURS // check if neighbours enabled
@@ -426,6 +434,14 @@ void MyMesh::sendFloodReply(mesh::Packet* packet, unsigned long delay_millis, ui
   }
 }
 
+void MyMesh::applyTelemReplyPower(mesh::Packet* packet) {
+#ifdef TELEM_REPLY_PER_PACKET_POWER
+  if (packet && _prefs.telem_reply_power_dbm != TELEM_REPLY_POWER_UNSET) {
+    packet->_tx_power = _prefs.telem_reply_power_dbm;
+  }
+#endif
+}
+
 bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
   if (_prefs.disable_fwd) return false;
   if (packet->isRouteFlood()) {
@@ -591,6 +607,15 @@ void MyMesh::onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const m
 
     if (reply_len == 0) return;   // invalid request
 
+    if (_prefs.telem_reply_zerohop) {
+      mesh::Packet* reply = createDatagram(PAYLOAD_TYPE_RESPONSE, sender, secret, reply_data, reply_len);
+      if (reply) {
+        applyTelemReplyPower(reply);
+        sendZeroHop(reply, SERVER_RESPONSE_DELAY);
+      }
+      return;
+    }
+
     if (packet->isRouteFlood()) {
       // let this sender know path TO here, so they can use sendDirect(), and ALSO encode the response
       mesh::Packet* path = createPathReturn(sender, secret, packet->path, packet->path_len,
@@ -667,6 +692,16 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
       client->last_timestamp = timestamp;
       client->last_activity = getRTCClock()->getCurrentTime();
 
+      if (_prefs.telem_reply_zerohop) {
+        mesh::Packet *reply =
+            createDatagram(PAYLOAD_TYPE_RESPONSE, client->id, secret, reply_data, reply_len);
+        if (reply) {
+          applyTelemReplyPower(reply);
+          sendZeroHop(reply, SERVER_RESPONSE_DELAY);
+        }
+        return;
+      }
+
       if (packet->isRouteFlood()) {
         // let this sender know path TO here, so they can use sendDirect(), and ALSO encode the response
         mesh::Packet *path = createPathReturn(client->id, secret, packet->path, packet->path_len,
@@ -709,7 +744,10 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
 
         mesh::Packet *ack = createAck(ack_hash);
         if (ack) {
-          if (client->out_path_len == OUT_PATH_UNKNOWN) {
+          if (_prefs.telem_reply_zerohop) {
+            applyTelemReplyPower(ack);
+            sendZeroHop(ack, TXT_ACK_DELAY);
+          } else if (client->out_path_len == OUT_PATH_UNKNOWN) {
             sendFloodReply(ack, TXT_ACK_DELAY, packet->getPathHashSize());
           } else {
             sendDirect(ack, client->out_path, client->out_path_len, TXT_ACK_DELAY);
@@ -737,7 +775,10 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
 
         auto reply = createDatagram(PAYLOAD_TYPE_TXT_MSG, client->id, secret, temp, 5 + text_len);
         if (reply) {
-          if (client->out_path_len == OUT_PATH_UNKNOWN) {
+          if (_prefs.telem_reply_zerohop) {
+            applyTelemReplyPower(reply);
+            sendZeroHop(reply, CLI_REPLY_DELAY_MILLIS);
+          } else if (client->out_path_len == OUT_PATH_UNKNOWN) {
             sendFloodReply(reply, CLI_REPLY_DELAY_MILLIS, packet->getPathHashSize());
           } else {
             sendDirect(reply, client->out_path, client->out_path_len, CLI_REPLY_DELAY_MILLIS);
@@ -887,6 +928,8 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.bw = LORA_BW;
   _prefs.cr = LORA_CR;
   _prefs.tx_power_dbm = LORA_TX_POWER;
+  _prefs.telem_reply_zerohop = TELEM_REPLY_ZEROHOP_DEFAULT;
+  _prefs.telem_reply_power_dbm = TELEM_REPLY_POWER_UNSET;
   _prefs.advert_interval = 1;        // default to 2 minutes for NEW installs
   _prefs.flood_advert_interval = 47; // 47 hours
   _prefs.flood_max = 64;
@@ -961,6 +1004,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
 
   radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
   radio_driver.setTxPower(_prefs.tx_power_dbm);
+  setTxPowerControl(setRepeaterTxPower, _prefs.tx_power_dbm);
 
   radio_driver.setRxBoostedGainMode(_prefs.rx_boosted_gain);
   MESH_DEBUG_PRINTLN("RX Boosted Gain Mode: %s",
@@ -1057,6 +1101,7 @@ void MyMesh::dumpLogFile() {
 
 void MyMesh::setTxPower(int8_t power_dbm) {
   radio_driver.setTxPower(power_dbm);
+  setNodeTxPower(power_dbm);
 }
 
 #if defined(USE_SX1262) || defined(USE_SX1268)

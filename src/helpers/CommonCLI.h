@@ -19,6 +19,8 @@
 #define LOOP_DETECT_MODERATE  2
 #define LOOP_DETECT_STRICT    3
 
+#define TELEM_REPLY_POWER_UNSET   ((int8_t)-128)
+
 struct NodePrefs { // persisted to file
   float airtime_factor;
   char node_name[32];
@@ -63,6 +65,8 @@ struct NodePrefs { // persisted to file
   uint8_t rx_boosted_gain; // power settings
   uint8_t path_hash_mode;   // which path mode to use when sending
   uint8_t loop_detect;
+  uint8_t telem_reply_zerohop;
+  int8_t telem_reply_power_dbm;
 };
 
 class CommonCLICallbacks {

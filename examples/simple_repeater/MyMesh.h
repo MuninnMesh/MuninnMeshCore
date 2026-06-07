@@ -129,6 +129,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
 
   File openAppend(const char* fname);
   bool isLooped(const mesh::Packet* packet, const uint8_t max_counters[]);
+  void applyTelemReplyPower(mesh::Packet* packet);
 
 protected:
   float getAirtimeBudgetFactor() const override {

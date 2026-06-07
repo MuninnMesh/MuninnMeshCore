@@ -16,6 +16,8 @@ namespace mesh {
 #define ROUTE_TYPE_DIRECT            0x02    // direct route, 'path' is supplied
 #define ROUTE_TYPE_TRANSPORT_DIRECT  0x03    // direct route + transport codes
 
+#define PACKET_TX_POWER_DEFAULT   ((int8_t)0x7F)
+
 #define PAYLOAD_TYPE_REQ         0x00    // request (prefixed with dest/src hashes, MAC) (enc data: timestamp, blob)
 #define PAYLOAD_TYPE_RESPONSE    0x01    // response to REQ or ANON_REQ (prefixed with dest/src hashes, MAC) (enc data: timestamp, blob)
 #define PAYLOAD_TYPE_TXT_MSG     0x02    // a plain text message (prefixed with dest/src hashes, MAC) (enc data: timestamp, text)
@@ -49,6 +51,7 @@ public:
   uint8_t path[MAX_PATH_SIZE];
   uint8_t payload[MAX_PACKET_PAYLOAD];
   int8_t _snr;
+  int8_t _tx_power;
 
   /**
    * \brief calculate the hash of payload + type

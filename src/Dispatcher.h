@@ -126,9 +126,13 @@ class Dispatcher {
   unsigned long tx_budget_ms;
   unsigned long last_budget_update;
   unsigned long duty_cycle_window_ms;
+  void (*_set_tx_power_fn)(int8_t);
+  int8_t _node_tx_power;
+  bool _tx_power_overridden;
 
   void processRecvPacket(Packet* pkt);
   void updateTxBudget();
+  void restoreTxPower();
 
 protected:
   PacketManager* _mgr;
@@ -150,6 +154,9 @@ protected:
     tx_budget_ms = 0;
     last_budget_update = 0;
     duty_cycle_window_ms = 3600000;
+    _set_tx_power_fn = NULL;
+    _node_tx_power = 0;
+    _tx_power_overridden = false;
   }
 
   virtual DispatcherAction onRecvPacket(Packet* pkt) = 0;
@@ -176,6 +183,11 @@ public:
   Packet* obtainNewPacket();
   void releasePacket(Packet* packet);
   void sendPacket(Packet* packet, uint8_t priority, uint32_t delay_millis=0);
+  void setTxPowerControl(void (*fn)(int8_t), int8_t node_dbm) {
+    _set_tx_power_fn = fn;
+    _node_tx_power = node_dbm;
+  }
+  void setNodeTxPower(int8_t node_dbm) { _node_tx_power = node_dbm; }
 
   unsigned long getTotalAirTime() const { return total_air_time; }
   unsigned long getReceiveAirTime() const {return rx_air_time; }

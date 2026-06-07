@@ -63,6 +63,13 @@ uint32_t Dispatcher::getCADFailMaxDuration() const {
   return 4000;   // 4 seconds
 }
 
+void Dispatcher::restoreTxPower() {
+  if (_tx_power_overridden && _set_tx_power_fn) {
+    _set_tx_power_fn(_node_tx_power);
+  }
+  _tx_power_overridden = false;
+}
+
 void Dispatcher::loop() {
   if (millisHasNowPassed(next_floor_calib_time)) {
     _radio->triggerNoiseFloorCalibrate(getInterferenceThreshold());
@@ -111,6 +118,7 @@ void Dispatcher::loop() {
       } else {
         n_sent_direct++;
       }
+      restoreTxPower();
       releasePacket(outbound);  // return to pool
       outbound = NULL;
     } else if (millisHasNowPassed(outbound_expiry)) {
@@ -119,6 +127,7 @@ void Dispatcher::loop() {
       _radio->onSendFinished();
       logTxFail(outbound, 2 + outbound->getPathByteLen() + outbound->payload_len);
 
+      restoreTxPower();
       releasePacket(outbound);  // return to pool
       outbound = NULL;
     } else {
@@ -323,6 +332,10 @@ void Dispatcher::checkSend() {
     } else {
       memcpy(&raw[len], outbound->payload, outbound->payload_len); len += outbound->payload_len;
 
+      if (_set_tx_power_fn && outbound->_tx_power != PACKET_TX_POWER_DEFAULT) {
+        _set_tx_power_fn(outbound->_tx_power);
+        _tx_power_overridden = true;
+      }
       uint32_t max_airtime = _radio->getEstAirtimeFor(len)*3/2;
       outbound_start = _ms->getMillis();
       bool success = _radio->startSendRaw(raw, len);
@@ -331,6 +344,7 @@ void Dispatcher::checkSend() {
 
         logTxFail(outbound, outbound->getRawLength());
   
+        restoreTxPower();
         releasePacket(outbound);  // return to pool
         outbound = NULL;
         return;
@@ -359,6 +373,7 @@ Packet* Dispatcher::obtainNewPacket() {
   } else {
     pkt->payload_len = pkt->path_len = 0;
     pkt->_snr = 0;
+    pkt->_tx_power = PACKET_TX_POWER_DEFAULT;
   }
   return pkt;
 }
