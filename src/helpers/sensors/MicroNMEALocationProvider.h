@@ -111,6 +111,12 @@ public :
         }
     }
 
+    bool getLastTimeSyncMillis(uint32_t& sync_ms) const override {
+        if (_last_time_sync == 0) return false;
+        sync_ms = (uint32_t)_last_time_sync;
+        return true;
+    }
+
     void syncTime() override { nmea.clear(); LocationProvider::syncTime(); }
     long getLatitude() override { return nmea.getLatitude(); }
     long getLongitude() override { return nmea.getLongitude(); }

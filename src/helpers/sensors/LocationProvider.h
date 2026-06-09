@@ -10,6 +10,7 @@ protected:
 public:
     virtual void syncTime() { _time_sync_needed = true; }
     virtual bool waitingTimeSync() { return _time_sync_needed; }
+    virtual bool getLastTimeSyncMillis(uint32_t& sync_ms) const { (void)sync_ms; return false; }
     virtual long getLatitude() = 0;
     virtual long getLongitude() = 0;
     virtual long getAltitude() = 0;

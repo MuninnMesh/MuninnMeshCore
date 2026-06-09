@@ -2,6 +2,18 @@
 #include <Mesh.h>
 #include "MyMesh.h"
 
+#ifndef STARTUP_DISPLAY_DELAY_MS
+#define STARTUP_DISPLAY_DELAY_MS 0
+#endif
+
+#ifndef STARTUP_SENSORS_DELAY_MS
+#define STARTUP_SENSORS_DELAY_MS 0
+#endif
+
+#ifndef RADIO_GET_RNG_SEED
+#define RADIO_GET_RNG_SEED() radio_driver.getRngSeed()
+#endif
+
 // Believe it or not, this std C function is busted on some platforms!
 static uint32_t _atoi(const char* sp) {
   uint32_t n = 0;
@@ -117,6 +129,9 @@ void setup() {
   board.begin();
 
 #ifdef DISPLAY_CLASS
+#if STARTUP_DISPLAY_DELAY_MS > 0
+  delay(STARTUP_DISPLAY_DELAY_MS);
+#endif
   DisplayDriver* disp = NULL;
   if (display.begin()) {
     disp = &display;
@@ -131,7 +146,7 @@ void setup() {
 
   if (!radio_init()) { halt(); }
 
-  fast_rng.begin(radio_driver.getRngSeed());
+  fast_rng.begin(RADIO_GET_RNG_SEED());
 
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   InternalFS.begin();
@@ -229,6 +244,9 @@ void setup() {
   #error "need to define filesystem"
 #endif
 
+#if STARTUP_SENSORS_DELAY_MS > 0
+  delay(STARTUP_SENSORS_DELAY_MS);
+#endif
   sensors.begin();
 
 #if ENV_INCLUDE_GPS == 1

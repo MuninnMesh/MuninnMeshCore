@@ -136,6 +136,22 @@ public:
     m = getFloat(&_buf[_pos], 2, 1, true); _pos += 2;
     return _pos <= _len;
   }
+  bool readDirection(float& degrees) {
+    degrees = getFloat(&_buf[_pos], 2, 1, false); _pos += 2;
+    return _pos <= _len;
+  }
+  bool readAccelerometer(float& x, float& y, float& z) {
+    x = getFloat(&_buf[_pos], 2, 1000, true); _pos += 2;
+    y = getFloat(&_buf[_pos], 2, 1000, true); _pos += 2;
+    z = getFloat(&_buf[_pos], 2, 1000, true); _pos += 2;
+    return _pos <= _len;
+  }
+  bool readGyrometer(float& x, float& y, float& z) {
+    x = getFloat(&_buf[_pos], 2, 100, true); _pos += 2;
+    y = getFloat(&_buf[_pos], 2, 100, true); _pos += 2;
+    z = getFloat(&_buf[_pos], 2, 100, true); _pos += 2;
+    return _pos <= _len;
+  }
 
   void skipData(uint8_t type) {
     switch (type) {

@@ -72,6 +72,14 @@
 
 /* -------------------------------------------------------------------------------------- */
 
+#ifndef ADVERT_PATH_TABLE_SIZE
+#define ADVERT_PATH_TABLE_SIZE   16
+#endif
+
+#ifndef REPEATER_DISCOVERY_TABLE_SIZE
+#define REPEATER_DISCOVERY_TABLE_SIZE 8
+#endif
+
 #define REQ_TYPE_GET_STATUS             0x01 // same as _GET_STATS
 #define REQ_TYPE_KEEP_ALIVE             0x02
 #define REQ_TYPE_GET_TELEMETRY_DATA     0x03
@@ -81,7 +89,34 @@ struct AdvertPath {
   uint8_t path_len;
   char    name[32];
   uint32_t recv_timestamp;
+  int8_t  last_rssi;
+  int8_t  last_snr;
   uint8_t path[MAX_PATH_SIZE];
+};
+
+struct RepeaterDiscoveryInfo {
+  uint8_t pub_key[PUB_KEY_SIZE];
+  char    name[32];
+  int32_t gps_lat;
+  int32_t gps_lon;
+  uint32_t recv_timestamp;
+  int8_t last_rssi;
+  int8_t last_snr;
+  uint8_t path_len;
+  bool known_contact;
+};
+
+struct DirectionalPingStatus {
+  bool active;
+  bool pending;
+  bool success;
+  uint32_t tag;
+  unsigned long started_ms;
+  unsigned long deadline_ms;
+  unsigned long result_until_ms;
+  uint8_t pub_key[PUB_KEY_SIZE];
+  int8_t rssi;
+  int8_t snr;  // SNR * 4
 };
 
 class MyMesh : public BaseChatMesh, public DataStoreHost {
@@ -101,6 +136,12 @@ public:
   void enterCLIRescue();
 
   int  getRecentlyHeard(AdvertPath dest[], int max_num);
+  bool startRepeaterDiscovery(uint32_t duration_ms);
+  bool isRepeaterDiscoveryActive();
+  bool getDiscoveredRepeaterBySlot(uint8_t slot, RepeaterDiscoveryInfo& dest);
+  int  startRepeaterPing(const uint8_t pub_key[PUB_KEY_SIZE], uint32_t timeout_ms);
+  bool getDirectionalPingStatus(DirectionalPingStatus& status);
+  void clearDirectionalPingStatus();
 
 protected:
   float getAirtimeBudgetFactor() const override;
@@ -166,6 +207,10 @@ protected:
 public:
   void savePrefs() { _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon); }
 
+  void applyPowerProfile() {
+    sensors.setPowerProfile(_prefs.power_profile);
+  }
+
 #if ENV_INCLUDE_GPS == 1
   void applyGpsPrefs() {
     sensors.setSettingValue("gps", _prefs.gps_enabled ? "1" : "0");
@@ -198,6 +243,12 @@ private:
   void checkCLIRescueCmd();
   void checkSerialInterface();
   bool isValidClientRepeatFreq(uint32_t f) const;
+  bool hasNonEmptyLocation(double lat, double lon) const;
+  void maybePersistLatestLocation();
+  void clearRepeaterDiscovery();
+  void recordRepeaterDiscoveryHit(const uint8_t pub_key[PUB_KEY_SIZE], uint8_t path_len,
+                                  int8_t rssi, int8_t snr);
+  bool handleRepeaterDiscoveryResponse(mesh::Packet* packet);
 
   // helpers, short-cuts
   void saveChannels() { _store->saveChannels(this); }
@@ -209,6 +260,10 @@ private:
   uint32_t pending_status;
   uint32_t pending_telemetry, pending_discovery;   // pending _TELEMETRY_REQ
   uint32_t pending_req;   // pending _BINARY_REQ
+  uint32_t pending_repeater_discovery;
+  unsigned long pending_repeater_discovery_until;
+  DirectionalPingStatus directional_ping;
+  RepeaterDiscoveryInfo repeater_discovery[REPEATER_DISCOVERY_TABLE_SIZE];
   BaseSerialInterface *_serial;
   AbstractUITask* _ui;
 
@@ -219,11 +274,15 @@ private:
   bool _iter_started;
   bool _cli_rescue;
   bool send_unscoped;   // force un-scoped flood (instead of using send_scope)
-  char cli_command[80];
+  char cli_command[160];
   uint8_t app_target_ver;
   uint8_t *sign_data;
   uint32_t sign_data_len;
   unsigned long dirty_contacts_expiry;
+  double persisted_node_lat;
+  double persisted_node_lon;
+  unsigned long next_location_persist_ms;
+  bool persisted_location_valid;
 
   TransportKey send_scope;
 
@@ -249,7 +308,6 @@ private:
   AckTableEntry expected_ack_table[EXPECTED_ACK_TABLE_SIZE]; // circular table
   int next_ack_idx;
 
-  #define ADVERT_PATH_TABLE_SIZE   16
   AdvertPath advert_paths[ADVERT_PATH_TABLE_SIZE]; // circular table
 };
 

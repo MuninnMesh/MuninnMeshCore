@@ -8,6 +8,18 @@
 #define TELEM_WIRE &Wire  // Use default I2C bus for Environment Sensors
 #endif
 
+#ifndef ENV_GPS_EXPOSE_SETTING
+#define ENV_GPS_EXPOSE_SETTING 0
+#endif
+
+#ifndef ENV_GPS_SKIP_BOOT_PROBE
+#define ENV_GPS_SKIP_BOOT_PROBE 0
+#endif
+
+#ifndef GPS_START_DELAY_MS
+#define GPS_START_DELAY_MS 0
+#endif
+
 // ============================================================
 // Sensor library includes and static driver instances
 // ============================================================
@@ -667,8 +679,8 @@ bool EnvironmentSensorManager::begin() {
 bool EnvironmentSensorManager::querySensors(uint8_t requester_permissions, CayenneLPP& telemetry) {
   next_available_channel = TELEM_CHANNEL_SELF + 1;
 
-  if (requester_permissions & TELEM_PERM_LOCATION && gps_active) {
-    telemetry.addGPS(TELEM_CHANNEL_SELF, node_lat, node_lon, node_altitude);
+  if ((requester_permissions & TELEM_PERM_LOCATION) && (node_lat != 0.0 || node_lon != 0.0)) {
+    telemetry.addGPS(TELEM_CHANNEL_SELF, node_lat, node_lon, node_altitude); // allow lat/lon via telemetry even if no GPS is detected
   }
 
   if (requester_permissions & TELEM_PERM_ENVIRONMENT) {
@@ -685,7 +697,7 @@ bool EnvironmentSensorManager::querySensors(uint8_t requester_permissions, Cayen
 int EnvironmentSensorManager::getNumSettings() const {
   int settings = 0;
   #if ENV_INCLUDE_GPS
-    if (gps_detected) settings++;  // only show GPS setting if GPS is detected
+    if (gps_detected || ENV_GPS_EXPOSE_SETTING) settings++;
   #endif
   return settings;
 }
@@ -693,7 +705,7 @@ int EnvironmentSensorManager::getNumSettings() const {
 const char* EnvironmentSensorManager::getSettingName(int i) const {
   int settings = 0;
   #if ENV_INCLUDE_GPS
-    if (gps_detected && i == settings++) {
+    if ((gps_detected || ENV_GPS_EXPOSE_SETTING) && i == settings++) {
       return "gps";
     }
   #endif
@@ -703,7 +715,7 @@ const char* EnvironmentSensorManager::getSettingName(int i) const {
 const char* EnvironmentSensorManager::getSettingValue(int i) const {
   int settings = 0;
   #if ENV_INCLUDE_GPS
-    if (gps_detected && i == settings++) {
+    if ((gps_detected || ENV_GPS_EXPOSE_SETTING) && i == settings++) {
       return gps_active ? "1" : "0";
     }
   #endif
@@ -712,7 +724,7 @@ const char* EnvironmentSensorManager::getSettingValue(int i) const {
 
 bool EnvironmentSensorManager::setSettingValue(const char* name, const char* value) {
   #if ENV_INCLUDE_GPS
-  if (gps_detected && strcmp(name, "gps") == 0) {
+  if ((gps_detected || ENV_GPS_EXPOSE_SETTING) && strcmp(name, "gps") == 0) {
     if (strcmp(value, "0") == 0) {
       stop_gps();
     } else {
@@ -729,6 +741,40 @@ bool EnvironmentSensorManager::setSettingValue(const char* name, const char* val
   return false;  // not supported
 }
 
+bool EnvironmentSensorManager::setGPSEnabled(bool enabled) {
+#if ENV_INCLUDE_GPS
+  if (enabled) {
+    start_gps();
+  } else {
+    stop_gps();
+  }
+  return true;
+#else
+  (void)enabled;
+  return false;
+#endif
+}
+
+bool EnvironmentSensorManager::getGPSStatus(GPSStatus& status) {
+  fillBaseGPSStatus(status);
+#if ENV_INCLUDE_GPS
+  status.gps_available = gps_detected || ENV_GPS_EXPOSE_SETTING;
+  status.gps_active = gps_active;
+  if (_location != NULL && gps_active && _location->isValid()) {
+    status.live_fix_valid = true;
+    status.live_lat = ((double)_location->getLatitude()) / 1000000.0;
+    status.live_lon = ((double)_location->getLongitude()) / 1000000.0;
+    status.live_altitude = ((double)_location->getAltitude()) / 1000.0;
+    status.live_fix_age_sec = 0;
+  }
+  status.telemetry_using_persisted_location =
+    status.persisted_location_valid && (!status.live_fix_valid || !gps_active);
+  return status.gps_available || status.live_fix_valid || status.persisted_location_valid;
+#else
+  return status.live_fix_valid || status.persisted_location_valid;
+#endif
+}
+
 #if ENV_INCLUDE_GPS
 void EnvironmentSensorManager::initBasicGPS() {
 
@@ -740,7 +786,19 @@ void EnvironmentSensorManager::initBasicGPS() {
   Serial1.begin(9600);
   #endif
 
+#if ENV_GPS_SKIP_BOOT_PROBE
+  gps_detected = false;
+  gps_active = false;
+  _location->stop();
+  MESH_DEBUG_PRINTLN("GPS boot probe skipped");
+  return;
+#endif
+
   // Try to detect if GPS is physically connected to determine if we should expose the setting
+#if GPS_START_DELAY_MS > 0
+  delay(GPS_START_DELAY_MS);
+#endif
+
   _location->begin();
   _location->reset();
 
@@ -861,6 +919,10 @@ void EnvironmentSensorManager::start_gps() {
     return;
   #endif
 
+#if GPS_START_DELAY_MS > 0
+  delay(GPS_START_DELAY_MS);
+#endif
+
   _location->begin();
   _location->reset();
 
@@ -902,6 +964,7 @@ void EnvironmentSensorManager::loop() {
       node_lon = ((double)_location->getLongitude())/1000000.;
       MESH_DEBUG_PRINTLN("lat %f lon %f", node_lat, node_lon);
       node_altitude = ((double)_location->getAltitude()) / 1000.0;
+      noteLiveLocation(node_lat, node_lon, node_altitude);
       MESH_DEBUG_PRINTLN("lat %f lon %f alt %f", node_lat, node_lon, node_altitude);
     }
     #else
@@ -910,6 +973,7 @@ void EnvironmentSensorManager::loop() {
       node_lon = ((double)_location->getLongitude())/1000000.;
       MESH_DEBUG_PRINTLN("lat %f lon %f", node_lat, node_lon);
       node_altitude = ((double)_location->getAltitude()) / 1000.0;
+      noteLiveLocation(node_lat, node_lon, node_altitude);
       MESH_DEBUG_PRINTLN("lat %f lon %f alt %f", node_lat, node_lon, node_altitude);
     }
     #endif

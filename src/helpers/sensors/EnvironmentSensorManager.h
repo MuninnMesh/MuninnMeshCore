@@ -50,4 +50,7 @@ public:
   const char* getSettingName(int i) const override;
   const char* getSettingValue(int i) const override;
   bool setSettingValue(const char* name, const char* value) override;
+  bool getGPSStatus(GPSStatus& status) override;
+  bool isGPSEnabled() const override { return gps_active; }
+  bool setGPSEnabled(bool enabled) override;
 };

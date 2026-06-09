@@ -8,6 +8,11 @@
 #define ADVERT_LOC_NONE       0
 #define ADVERT_LOC_SHARE      1
 
+#define NODE_POWER_PROFILE_NORMAL      0
+#define NODE_POWER_PROFILE_EXPEDITION  1
+#define NODE_POWER_PROFILE_STATIONARY  2
+#define NODE_POWER_PROFILE_COUNT       3
+
 struct NodePrefs {  // persisted to file
   float airtime_factor;
   char node_name[32];
@@ -34,4 +39,5 @@ struct NodePrefs {  // persisted to file
   uint8_t autoadd_max_hops;  // 0 = no limit, 1 = direct (0 hops), N = up to N-1 hops (max 64)
   char default_scope_name[31];
   uint8_t default_scope_key[16];
+  uint8_t power_profile;     // NODE_POWER_PROFILE_*
 };

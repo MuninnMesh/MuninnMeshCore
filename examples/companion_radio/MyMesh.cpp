@@ -63,6 +63,21 @@
 #define CMD_GET_DEFAULT_FLOOD_SCOPE   64
 #define CMD_SEND_RAW_PACKET           65
 
+#define CTL_TYPE_NODE_DISCOVER_REQ    0x80
+#define CTL_TYPE_NODE_DISCOVER_RESP   0x90
+
+#ifndef DIRECTIONAL_PING_RESULT_MS
+#define DIRECTIONAL_PING_RESULT_MS 3500
+#endif
+
+#ifndef GPS_LOCATION_PERSIST_INTERVAL_MS
+#define GPS_LOCATION_PERSIST_INTERVAL_MS 120000
+#endif
+
+#ifndef GPS_LOCATION_PERSIST_MIN_DELTA_DEG
+#define GPS_LOCATION_PERSIST_MIN_DELTA_DEG 0.0001
+#endif
+
 // Stats sub-types for CMD_GET_STATS
 #define STATS_TYPE_CORE               0
 #define STATS_TYPE_RADIO              1
@@ -161,6 +176,183 @@ void MyMesh::writeDisabledFrame() {
   uint8_t buf[1];
   buf[0] = RESP_CODE_DISABLED;
   _serial->writeFrame(buf, 1);
+}
+
+void MyMesh::clearDirectionalPingStatus() {
+  memset(&directional_ping, 0, sizeof(directional_ping));
+}
+
+void MyMesh::clearRepeaterDiscovery() {
+  pending_repeater_discovery = 0;
+  pending_repeater_discovery_until = 0;
+  memset(repeater_discovery, 0, sizeof(repeater_discovery));
+}
+
+bool MyMesh::isRepeaterDiscoveryActive() {
+  if (pending_repeater_discovery == 0) return false;
+  if (millisHasNowPassed(pending_repeater_discovery_until)) {
+    pending_repeater_discovery = 0;
+    pending_repeater_discovery_until = 0;
+    return false;
+  }
+  return true;
+}
+
+void MyMesh::recordRepeaterDiscoveryHit(const uint8_t pub_key[PUB_KEY_SIZE], uint8_t path_len,
+                                        int8_t rssi, int8_t snr) {
+  if (path_len != 0 || !isRepeaterDiscoveryActive()) return;
+
+  RepeaterDiscoveryInfo* use = NULL;
+  RepeaterDiscoveryInfo* oldest = &repeater_discovery[0];
+  for (int i = 0; i < REPEATER_DISCOVERY_TABLE_SIZE; i++) {
+    RepeaterDiscoveryInfo* entry = &repeater_discovery[i];
+    if (entry->recv_timestamp != 0 && memcmp(entry->pub_key, pub_key, PUB_KEY_SIZE) == 0) {
+      use = entry;
+      break;
+    }
+    if (entry->recv_timestamp == 0) {
+      use = entry;
+      break;
+    }
+    if (entry->recv_timestamp < oldest->recv_timestamp) oldest = entry;
+  }
+  if (use == NULL) use = oldest;
+
+  memset(use, 0, sizeof(*use));
+  memcpy(use->pub_key, pub_key, PUB_KEY_SIZE);
+  use->recv_timestamp = getRTCClock()->getCurrentTime();
+  if (use->recv_timestamp == 0) use->recv_timestamp = 1;
+  use->last_rssi = rssi;
+  use->last_snr = snr;
+  use->path_len = path_len;
+
+  ContactInfo* contact = lookupContactByPubKey(pub_key, PUB_KEY_SIZE);
+  if (contact != NULL && contact->type == ADV_TYPE_REPEATER) {
+    StrHelper::strncpy(use->name, contact->name[0] ? contact->name : "Repeater", sizeof(use->name));
+    use->gps_lat = contact->gps_lat;
+    use->gps_lon = contact->gps_lon;
+    use->known_contact = true;
+  } else {
+    snprintf(use->name, sizeof(use->name), "Rpt %02X%02X", pub_key[0], pub_key[1]);
+    use->known_contact = false;
+  }
+}
+
+bool MyMesh::getDiscoveredRepeaterBySlot(uint8_t slot, RepeaterDiscoveryInfo& dest) {
+  if (slot >= REPEATER_DISCOVERY_TABLE_SIZE) return false;
+  if (repeater_discovery[slot].recv_timestamp == 0 || repeater_discovery[slot].path_len != 0) return false;
+  dest = repeater_discovery[slot];
+  return true;
+}
+
+bool MyMesh::startRepeaterDiscovery(uint32_t duration_ms) {
+  clearRepeaterDiscovery();
+
+  uint8_t data[10];
+  data[0] = CTL_TYPE_NODE_DISCOVER_REQ;
+  data[1] = (1 << ADV_TYPE_REPEATER);
+  getRNG()->random(&data[2], 4);
+  memcpy(&pending_repeater_discovery, &data[2], 4);
+  uint32_t since = 0;
+  memcpy(&data[6], &since, 4);
+
+  mesh::Packet* pkt = createControlData(data, sizeof(data));
+  if (pkt == NULL) {
+    clearRepeaterDiscovery();
+    return false;
+  }
+
+  pending_repeater_discovery_until = futureMillis(duration_ms);
+  sendZeroHop(pkt);
+  return true;
+}
+
+int MyMesh::startRepeaterPing(const uint8_t pub_key[PUB_KEY_SIZE], uint32_t timeout_ms) {
+  DirectionalPingStatus current;
+  if (getDirectionalPingStatus(current) && current.pending) {
+    return MSG_SEND_FAILED;
+  }
+
+  uint8_t data[10];
+  data[0] = CTL_TYPE_NODE_DISCOVER_REQ;
+  data[1] = (1 << ADV_TYPE_REPEATER);
+  getRNG()->random(&data[2], 4);
+  uint32_t tag;
+  memcpy(&tag, &data[2], 4);
+  uint32_t since = 0;
+  memcpy(&data[6], &since, 4);
+
+  mesh::Packet* pkt = createControlData(data, sizeof(data));
+  if (pkt == NULL) return MSG_SEND_FAILED;
+
+  clearDirectionalPingStatus();
+  directional_ping.active = true;
+  directional_ping.pending = true;
+  directional_ping.success = false;
+  directional_ping.tag = tag;
+  directional_ping.started_ms = millis();
+  directional_ping.deadline_ms = directional_ping.started_ms + timeout_ms;
+  directional_ping.result_until_ms = 0;
+  memcpy(directional_ping.pub_key, pub_key, PUB_KEY_SIZE);
+  directional_ping.rssi = 0;
+  directional_ping.snr = 0;
+  sendZeroHop(pkt);
+  return MSG_SEND_SENT_DIRECT;
+}
+
+bool MyMesh::handleRepeaterDiscoveryResponse(mesh::Packet* packet) {
+  bool discovery_active = isRepeaterDiscoveryActive();
+  DirectionalPingStatus current;
+  bool ping_active = getDirectionalPingStatus(current) && current.pending;
+  if (packet->payload_len < 6 || packet->path_len != 0 || !(discovery_active || ping_active)) return false;
+
+  uint8_t type = packet->payload[0] & 0xF0;
+  uint8_t node_type = packet->payload[0] & 0x0F;
+  if (type != CTL_TYPE_NODE_DISCOVER_RESP || node_type != ADV_TYPE_REPEATER) return false;
+
+  uint32_t tag;
+  memcpy(&tag, &packet->payload[2], 4);
+  if (packet->payload_len < 6 + PUB_KEY_SIZE) return false;
+
+  mesh::Identity id(&packet->payload[6]);
+  if (id.matches(self_id)) return true;
+
+  if (discovery_active && tag == pending_repeater_discovery) {
+    recordRepeaterDiscoveryHit(id.pub_key, packet->path_len,
+                               (int8_t)_radio->getLastRSSI(),
+                               (int8_t)(_radio->getLastSNR() * 4));
+    return true;
+  }
+
+  if (ping_active && tag == directional_ping.tag &&
+      memcmp(directional_ping.pub_key, id.pub_key, PUB_KEY_SIZE) == 0) {
+    directional_ping.pending = false;
+    directional_ping.success = true;
+    directional_ping.rssi = (int8_t)_radio->getLastRSSI();
+    directional_ping.snr = (int8_t)(_radio->getLastSNR() * 4);
+    directional_ping.result_until_ms = millis() + DIRECTIONAL_PING_RESULT_MS;
+    return true;
+  }
+
+  return false;
+}
+
+bool MyMesh::getDirectionalPingStatus(DirectionalPingStatus& status) {
+  if (directional_ping.active) {
+    unsigned long now = millis();
+    if (directional_ping.pending && (long)(now - directional_ping.deadline_ms) >= 0) {
+      directional_ping.pending = false;
+      directional_ping.success = false;
+      directional_ping.result_until_ms = now + DIRECTIONAL_PING_RESULT_MS;
+    }
+    if (!directional_ping.pending && directional_ping.result_until_ms != 0 &&
+        (long)(now - directional_ping.result_until_ms) >= 0) {
+      clearDirectionalPingStatus();
+    }
+  }
+
+  status = directional_ping;
+  return status.active;
 }
 
 void MyMesh::writeContactRespFrame(uint8_t code, const ContactInfo &contact) {
@@ -380,7 +572,15 @@ void MyMesh::onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path
     memcpy(p->pubkey_prefix, contact.id.pub_key, sizeof(p->pubkey_prefix));
     strcpy(p->name, contact.name);
     p->recv_timestamp = getRTCClock()->getCurrentTime();
+    p->last_rssi = (int8_t)radio_driver.getLastRSSI();
+    p->last_snr = (int8_t)(radio_driver.getLastSNR() * 4);
     p->path_len = mesh::Packet::copyPath(p->path, path, path_len);
+  }
+
+  if (isRepeaterDiscoveryActive() && contact.type == ADV_TYPE_REPEATER && path_len == 0) {
+    recordRepeaterDiscoveryHit(contact.id.pub_key, path_len,
+                               (int8_t)radio_driver.getLastRSSI(),
+                               (int8_t)(radio_driver.getLastSNR() * 4));
   }
 
   if (!is_new) dirty_contacts_expiry = futureMillis(LAZY_CONTACTS_WRITE_DELAY); // only schedule lazy write for contacts that are in contacts[]
@@ -771,6 +971,8 @@ bool MyMesh::onContactPathRecv(ContactInfo& contact, uint8_t* in_path, uint8_t i
 }
 
 void MyMesh::onControlDataRecv(mesh::Packet *packet) {
+  handleRepeaterDiscoveryResponse(packet);
+
   if (packet->payload_len + 4 > sizeof(out_frame)) {
     MESH_DEBUG_PRINTLN("onControlDataRecv(), payload_len too long: %d", packet->payload_len);
     return;
@@ -860,9 +1062,15 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   offline_queue_len = 0;
   app_target_ver = 0;
   clearPendingReqs();
+  clearDirectionalPingStatus();
+  clearRepeaterDiscovery();
   next_ack_idx = 0;
   sign_data = NULL;
   dirty_contacts_expiry = 0;
+  persisted_node_lat = 0.0;
+  persisted_node_lon = 0.0;
+  next_location_persist_ms = 0;
+  persisted_location_valid = false;
   memset(advert_paths, 0, sizeof(advert_paths));
   memset(send_scope.key, 0, sizeof(send_scope.key));
   send_unscoped = false;
@@ -878,6 +1086,7 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _prefs.tx_power_dbm = LORA_TX_POWER;
   _prefs.gps_enabled = 0;       // GPS disabled by default
   _prefs.gps_interval = 0;      // No automatic GPS updates by default
+  _prefs.power_profile = NODE_POWER_PROFILE_NORMAL;
   //_prefs.rx_delay_base = 10.0f;  enable once new algo fixed
 #if defined(USE_SX1262) || defined(USE_SX1268)
 #ifdef SX126X_RX_BOOSTED_GAIN
@@ -924,6 +1133,13 @@ void MyMesh::begin(bool has_display) {
 
   // load persisted prefs
   _store->loadPrefs(_prefs, sensors.node_lat, sensors.node_lon);
+  persisted_node_lat = sensors.node_lat;
+  persisted_node_lon = sensors.node_lon;
+  persisted_location_valid = hasNonEmptyLocation(persisted_node_lat, persisted_node_lon);
+  if (persisted_location_valid) {
+    sensors.notePersistedLocation(persisted_node_lat, persisted_node_lon, sensors.node_altitude, false);
+  }
+  next_location_persist_ms = millis() + GPS_LOCATION_PERSIST_INTERVAL_MS;
 
   // sanitise bad pref values
   _prefs.rx_delay_base = constrain(_prefs.rx_delay_base, 0, 20.0f);
@@ -935,6 +1151,9 @@ void MyMesh::begin(bool has_display) {
   _prefs.tx_power_dbm = constrain(_prefs.tx_power_dbm, -9, MAX_LORA_TX_POWER);
   _prefs.gps_enabled = constrain(_prefs.gps_enabled, 0, 1);  // Ensure boolean 0 or 1
   _prefs.gps_interval = constrain(_prefs.gps_interval, 0, 86400);  // Max 24 hours
+  _prefs.power_profile = constrain(_prefs.power_profile, (uint8_t)NODE_POWER_PROFILE_NORMAL,
+                                   (uint8_t)NODE_POWER_PROFILE_STATIONARY);
+  applyPowerProfile();
 
 #ifdef BLE_PIN_CODE // 123456 by default
   if (_prefs.ble_pin == 0) {
@@ -2029,6 +2248,26 @@ void MyMesh::checkCLIRescueCmd() {
         _prefs.ble_pin = atoi(&config[4]);
         savePrefs();
         Serial.printf("  > pin is now %06d\n", _prefs.ble_pin);
+      } else if (memcmp(config, "prv.key ", 8) == 0) {
+        uint8_t prv_key[PRV_KEY_SIZE];
+        bool success = mesh::Utils::fromHex(prv_key, PRV_KEY_SIZE, &config[8]);
+        if (success && mesh::LocalIdentity::validatePrivateKey(prv_key)) {
+          mesh::LocalIdentity identity;
+          identity.readFrom(prv_key, PRV_KEY_SIZE);
+          if (_store->saveMainIdentity(identity)) {
+            self_id = identity;
+            Serial.print("  > private key restored, pubkey ");
+            mesh::Utils::printHex(Serial, self_id.pub_key, PUB_KEY_SIZE);
+            Serial.println();
+            Serial.println("  > rebooting");
+            delay(250);
+            board.reboot();
+          } else {
+            Serial.println("  Error: identity save failed");
+          }
+        } else {
+          Serial.println("  Error: bad private key");
+        }
       } else {
         Serial.printf("  Error: unknown config: %s\n", config);
       }
@@ -2178,6 +2417,40 @@ void MyMesh::checkCLIRescueCmd() {
   }
 }
 
+bool MyMesh::hasNonEmptyLocation(double lat, double lon) const {
+  return (lat != 0.0 || lon != 0.0) &&
+         lat >= -90.0 && lat <= 90.0 &&
+         lon >= -180.0 && lon <= 180.0;
+}
+
+void MyMesh::maybePersistLatestLocation() {
+#if ENV_INCLUDE_GPS == 1
+  if (!hasNonEmptyLocation(sensors.node_lat, sensors.node_lon)) return;
+
+  unsigned long now = millis();
+  bool sensor_requested_persist = sensors.shouldPersistLocationNow();
+  if (!sensor_requested_persist && persisted_location_valid) {
+    double dlat = sensors.node_lat - persisted_node_lat;
+    double dlon = sensors.node_lon - persisted_node_lon;
+    if (dlat < 0.0) dlat = -dlat;
+    if (dlon < 0.0) dlon = -dlon;
+    if (dlat < GPS_LOCATION_PERSIST_MIN_DELTA_DEG &&
+        dlon < GPS_LOCATION_PERSIST_MIN_DELTA_DEG) {
+      return;
+    }
+    if ((long)(now - next_location_persist_ms) < 0) return;
+  }
+
+  _store->savePrefs(_prefs, sensors.node_lat, sensors.node_lon);
+  persisted_node_lat = sensors.node_lat;
+  persisted_node_lon = sensors.node_lon;
+  persisted_location_valid = true;
+  sensors.notePersistedLocation(sensors.node_lat, sensors.node_lon, sensors.node_altitude, true);
+  next_location_persist_ms = now + GPS_LOCATION_PERSIST_INTERVAL_MS;
+  MESH_DEBUG_PRINTLN("Persisted latest GPS location lat %f lon %f", sensors.node_lat, sensors.node_lon);
+#endif
+}
+
 void MyMesh::checkSerialInterface() {
   size_t len = _serial->checkRecvFrame(cmd_frame);
   if (len > 0) {
@@ -2216,6 +2489,10 @@ void MyMesh::checkSerialInterface() {
 void MyMesh::loop() {
   BaseChatMesh::loop();
 
+  if (!_cli_rescue && Serial.available()) {
+    enterCLIRescue();
+  }
+
   if (_cli_rescue) {
     checkCLIRescueCmd();
   } else {
@@ -2227,6 +2504,8 @@ void MyMesh::loop() {
     saveContacts();
     dirty_contacts_expiry = 0;
   }
+
+  maybePersistLatestLocation();
 
 #ifdef DISPLAY_CLASS
   if (_ui) _ui->setHasConnection(_serial->isConnected());

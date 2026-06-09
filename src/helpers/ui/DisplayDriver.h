@@ -26,6 +26,8 @@ public:
   virtual void printWordWrap(const char* str, int max_width) { print(str); }   // fallback to basic print() if no override
   virtual void fillRect(int x, int y, int w, int h) = 0;
   virtual void drawRect(int x, int y, int w, int h) = 0;
+  virtual void drawLine(int x0, int y0, int x1, int y1) { (void)x0; (void)y0; (void)x1; (void)y1; }
+  virtual void drawCircle(int x, int y, int r) { (void)x; (void)y; (void)r; }
   virtual void drawXbm(int x, int y, const uint8_t* bits, int w, int h) = 0;
   virtual uint16_t getTextWidth(const char* str) = 0;
   virtual void drawTextCentered(int mid_x, int y, const char* str) {   // helper method (override to optimise)

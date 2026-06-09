@@ -28,7 +28,9 @@ public:
 
   void onSendFinished() override {
     RadioLibWrapper::onSendFinished();
-    _radio->setPreambleLength(preambleLengthForSF(getSpreadingFactor())); // overcomes weird issues with small and big pkts
+    // Keep LR1110 preamble length aligned with MeshCore's current SF after TX;
+    // the radio object may have packet-length-specific state after send.
+    _radio->setPreambleLength(preambleLengthForSF(getSpreadingFactor()));
   }
 
   float getLastRSSI() const override { return ((CustomLR1110 *)_radio)->getRSSI(); }
