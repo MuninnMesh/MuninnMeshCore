@@ -55,9 +55,13 @@ class UITask : public AbstractUITask {
   bool battery_external_powered;
   int next_backlight_btn_check = 0;
 #ifdef PIN_STATUS_LED
-  int led_state = 0;
-  int next_led_change = 0;
-  int last_led_increment = 0;
+  // unsigned long + signed-diff comparisons: the heartbeat runs continuously,
+  // so these must survive the 2^31 ms (~24.8 day) signed-int rollover.
+  uint8_t led_state = 0;
+  unsigned long next_led_change = 0;
+  unsigned long last_led_increment = 0;
+  unsigned long next_led_gps_check = 0;
+  bool led_gps_enabled = false;
 #endif
 #ifdef PIN_USER_BTN_ANA
   unsigned long _analogue_pin_read_millis = millis();
@@ -79,7 +83,6 @@ class UITask : public AbstractUITask {
   bool setGPSState(bool enabled, bool persist, bool alert);
 #ifdef PIN_ACTIVE_BUZZER
   void activeBuzzerBegin();
-  void activeBuzzerPlay(uint16_t duration_ms);
   void activeBuzzerPlayPattern(const uint16_t* pattern, uint8_t pattern_len);
   uint32_t activeBuzzerPatternDuration(const uint16_t* pattern, uint8_t pattern_len);
   void activeBuzzerAdvance();
@@ -92,6 +95,9 @@ class UITask : public AbstractUITask {
 #endif
 #ifdef UI_HAS_GPS_SWITCH
   bool applyGPSSwitchPolicy(int state, bool alert);
+  // Returns true if shutdown was initiated — the CALLER MUST ABORT immediately
+  // (begin() returns before constructing screens; loop() returns before
+  // touching UI state). Runtime OFF is fail-safed to non-destructive.
   bool applyGPSSwitchAction(int state, bool alert);
   void showGPSSwitchFeedback(int state);
 #endif

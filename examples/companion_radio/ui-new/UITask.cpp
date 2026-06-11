@@ -163,6 +163,55 @@ static const uint16_t active_buzzer_power_pattern[] = {
 #ifndef UI_COMPASS_REFRESH_MS
 #define UI_COMPASS_REFRESH_MS 100
 #endif
+// Cadence while the displayed compass values are unchanged (device static).
+#ifndef UI_COMPASS_REFRESH_IDLE_MS
+#define UI_COMPASS_REFRESH_IDLE_MS 250
+#endif
+
+// Battery indicator defaults (see batteryPercent()). BATT_USE_OCV_PERCENT=1
+// switches the flat min/max mapping to the BATT_OCV_* discharge-curve lookup.
+#ifndef BATT_MIN_MILLIVOLTS
+#define BATT_MIN_MILLIVOLTS 3000
+#endif
+#ifndef BATT_MAX_MILLIVOLTS
+#define BATT_MAX_MILLIVOLTS 4200
+#endif
+#ifndef BATT_USE_OCV_PERCENT
+#define BATT_USE_OCV_PERCENT 0
+#endif
+#ifndef BATT_OCV_100_MILLIVOLTS
+#define BATT_OCV_100_MILLIVOLTS 4190
+#endif
+#ifndef BATT_OCV_90_MILLIVOLTS
+#define BATT_OCV_90_MILLIVOLTS 4050
+#endif
+#ifndef BATT_OCV_80_MILLIVOLTS
+#define BATT_OCV_80_MILLIVOLTS 3990
+#endif
+#ifndef BATT_OCV_70_MILLIVOLTS
+#define BATT_OCV_70_MILLIVOLTS 3890
+#endif
+#ifndef BATT_OCV_60_MILLIVOLTS
+#define BATT_OCV_60_MILLIVOLTS 3800
+#endif
+#ifndef BATT_OCV_50_MILLIVOLTS
+#define BATT_OCV_50_MILLIVOLTS 3720
+#endif
+#ifndef BATT_OCV_40_MILLIVOLTS
+#define BATT_OCV_40_MILLIVOLTS 3630
+#endif
+#ifndef BATT_OCV_30_MILLIVOLTS
+#define BATT_OCV_30_MILLIVOLTS 3530
+#endif
+#ifndef BATT_OCV_20_MILLIVOLTS
+#define BATT_OCV_20_MILLIVOLTS 3420
+#endif
+#ifndef BATT_OCV_10_MILLIVOLTS
+#define BATT_OCV_10_MILLIVOLTS 3300
+#endif
+#ifndef BATT_OCV_0_MILLIVOLTS
+#define BATT_OCV_0_MILLIVOLTS 3100
+#endif
 #ifndef UI_COMPASS_HEADING_ALPHA
 #define UI_COMPASS_HEADING_ALPHA 0.18f
 #endif
@@ -497,6 +546,14 @@ class HomeScreen : public UIScreen {
   size_t quick_keyboard_len = 0;
   char quick_keyboard_text[96];
   AdvertPath group_recent[ADVERT_PATH_TABLE_SIZE];
+  unsigned long group_recent_refresh_ms = 0;  // next time to re-sort recently-heard
+  // Recipient pinned when leaving QUICK_TARGETS. The actions/keyboard stages
+  // and the final send resolve against this identity (pubkey for contacts),
+  // not the list ordinal — the companion app can add/remove/unfavorite
+  // contacts over BLE mid-compose, which shifts every ordinal after the edit.
+  bool quick_pinned_valid = false;
+  QuickTarget quick_pinned_target = {};
+  uint8_t quick_pinned_pubkey[PUB_KEY_SIZE] = {0};
 
   const char* quickActionLabel(int idx) {
     switch (idx) {
@@ -613,6 +670,46 @@ class HomeScreen : public UIScreen {
     return _page == HomePage::CHANNELS ? getQuickChannelTarget(ordinal, target) : getQuickContactTarget(ordinal, target);
   }
 
+  // Capture the currently highlighted target as the pinned recipient.
+  bool pinQuickTarget() {
+    quick_pinned_valid = false;
+    if (!getCurrentQuickTarget(currentQuickSelected(), quick_pinned_target)) return false;
+    if (!quick_pinned_target.is_channel) {
+      ContactInfo contact;
+      if (!the_mesh.getContactByIdx(quick_pinned_target.idx, contact)) return false;
+      memcpy(quick_pinned_pubkey, contact.id.pub_key, PUB_KEY_SIZE);
+    }
+    quick_pinned_valid = true;
+    return true;
+  }
+
+  // Re-resolve the pinned recipient by identity. For contacts the slot is
+  // re-validated against the pinned pubkey (and re-found if the table shifted);
+  // returns false if the contact no longer exists.
+  bool resolvePinnedQuickTarget(QuickTarget& target) {
+    if (!quick_pinned_valid) return false;
+    target = quick_pinned_target;
+    if (target.is_channel) {
+      ChannelDetails channel;
+      return the_mesh.getChannel(target.idx, channel) && channel.name[0] != 0;
+    }
+    ContactInfo contact;
+    if (the_mesh.getContactByIdx(target.idx, contact) &&
+        memcmp(contact.id.pub_key, quick_pinned_pubkey, PUB_KEY_SIZE) == 0) {
+      return true;
+    }
+    int num = the_mesh.getNumContacts();
+    for (int i = 0; i < num; i++) {
+      if (the_mesh.getContactByIdx(i, contact) &&
+          memcmp(contact.id.pub_key, quick_pinned_pubkey, PUB_KEY_SIZE) == 0) {
+        target.idx = i;
+        quick_pinned_target.idx = i;
+        return true;
+      }
+    }
+    return false;
+  }
+
   int getCurrentQuickTargetCount() {
     return _page == HomePage::CHANNELS ? getQuickChannelCount() : getQuickContactCount();
   }
@@ -694,27 +791,6 @@ class HomeScreen : public UIScreen {
     }
   }
 
-  void formatAge(uint32_t recv_timestamp, char* dest, size_t dest_size) {
-    if (recv_timestamp == 0 || _rtc == NULL) {
-      StrHelper::strncpy(dest, "--", dest_size);
-      return;
-    }
-    int32_t secs = (int32_t)(_rtc->getCurrentTime() - recv_timestamp);
-    if (secs < 0) secs = 0;
-    uint32_t mins = (secs + 59) / 60;
-    if (mins < 24) {
-      snprintf(dest, dest_size, "%lum", (unsigned long)mins);
-      return;
-    }
-    uint32_t hours = (mins + 59) / 60;
-    if (hours < 24 * 7) {
-      snprintf(dest, dest_size, "%luh", (unsigned long)hours);
-      return;
-    }
-    uint32_t days = (hours + 23) / 24;
-    snprintf(dest, dest_size, "%lud", (unsigned long)days);
-  }
-
   bool hasLatLon(double lat, double lon) const {
     return lat != 0.0 || lon != 0.0;
   }
@@ -788,13 +864,12 @@ class HomeScreen : public UIScreen {
     formatDistanceTo(contact.gps_lat / 1000000.0, contact.gps_lon / 1000000.0, dest, dest_size);
   }
 
-  bool getRelativeDirectionTo(double target_lat, double target_lon, float& relative) {
-    if (_sensors == NULL || !hasLatLon(_sensors->node_lat, _sensors->node_lon) ||
+  // Variant for list renderers: takes a pre-fetched compass reading so a
+  // 7-row list does one ~130-byte getCompass() copy per frame, not per row.
+  bool getRelativeDirectionWith(const SensorManager::CompassReading& compass, bool compass_ok,
+                                double target_lat, double target_lon, float& relative) {
+    if (!compass_ok || _sensors == NULL || !hasLatLon(_sensors->node_lat, _sensors->node_lon) ||
         !hasLatLon(target_lat, target_lon)) {
-      return false;
-    }
-    SensorManager::CompassReading compass;
-    if (!_sensors->getCompass(compass) || !compass.flat) {
       return false;
     }
     float bearing = bearingDeg(_sensors->node_lat, _sensors->node_lon, target_lat, target_lon);
@@ -802,9 +877,12 @@ class HomeScreen : public UIScreen {
     return true;
   }
 
-  bool getRelativeDirectionDeg(const ContactInfo& contact, float& relative) {
-    return getRelativeDirectionTo(contact.gps_lat / 1000000.0, contact.gps_lon / 1000000.0, relative);
+  bool getRelativeDirectionTo(double target_lat, double target_lon, float& relative) {
+    SensorManager::CompassReading compass;
+    bool compass_ok = _sensors != NULL && _sensors->getCompass(compass) && compass.flat;
+    return getRelativeDirectionWith(compass, compass_ok, target_lat, target_lon, relative);
   }
+
 
   // Small arrow pointing at relative_deg (0 = straight up/ahead). Screen frame: x = sin, y = -cos.
   void drawDirectionArrow(DisplayDriver& display, int cx, int cy, float relative_deg) {
@@ -884,9 +962,9 @@ class HomeScreen : public UIScreen {
     }
 
     QuickTarget target;
-    if (!getCurrentQuickTarget(currentQuickSelected(), target)) {
+    if (!resolvePinnedQuickTarget(target)) {
       _task->showAlert("No chat", 800);
-      quick_stage = QUICK_TARGETS;
+      resetQuickSendStage();
       return;
     }
 
@@ -946,8 +1024,8 @@ class HomeScreen : public UIScreen {
 
   void renderQuickKeyboard(DisplayDriver& display) {
     QuickTarget target;
-    if (!getCurrentQuickTarget(currentQuickSelected(), target)) {
-      quick_stage = QUICK_TARGETS;
+    if (!resolvePinnedQuickTarget(target)) {
+      resetQuickSendStage();
       if (_page == HomePage::CHANNELS) renderChannelList(display);
       else renderGroupList(display);
       return;
@@ -959,9 +1037,12 @@ class HomeScreen : public UIScreen {
 
     size_t start = quick_keyboard_len > 18 ? quick_keyboard_len - 18 : 0;
     StrHelper::strncpy(typed, &quick_keyboard_text[start], sizeof(typed));
-    if (quick_keyboard_len < sizeof(typed) - 1) {
-      typed[quick_keyboard_len - start] = '_';
-      typed[quick_keyboard_len - start + 1] = 0;
+    // Guard on the VISIBLE length (<=18), not the total typed length — the
+    // cursor must not disappear once the message grows past the window.
+    size_t visible = quick_keyboard_len - start;
+    if (visible + 1 < sizeof(typed)) {
+      typed[visible] = '_';
+      typed[visible + 1] = 0;
     }
 
     display.setTextSize(1);
@@ -1022,7 +1103,7 @@ class HomeScreen : public UIScreen {
       QuickTarget target;
       char label[70];
       bool selected = first + row == quick_channel_selected;
-      getQuickChannelTarget(first + row, target);
+      if (!getQuickChannelTarget(first + row, target)) continue;  // don't format an unset target
       formatQuickTarget(display, target, label, sizeof(label));
       display.setColor(selected ? DisplayDriver::GREEN : DisplayDriver::LIGHT);
       drawRowMarker(display, y, selected);
@@ -1048,7 +1129,16 @@ class HomeScreen : public UIScreen {
     }
 
     clampQuickSendSelection();
-    the_mesh.getRecentlyHeard(group_recent, ADVERT_PATH_TABLE_SIZE);
+    // getRecentlyHeard() qsorts the live advert table — refresh at most every
+    // 2s instead of every 500ms frame; row redraws don't need fresher data.
+    unsigned long now_ms = millis();
+    if (group_recent_refresh_ms == 0 || (long)(now_ms - group_recent_refresh_ms) >= 0) {
+      the_mesh.getRecentlyHeard(group_recent, ADVERT_PATH_TABLE_SIZE);
+      group_recent_refresh_ms = now_ms + 2000;
+    }
+    // One compass fetch for all rows in this frame.
+    SensorManager::CompassReading row_compass;
+    bool row_compass_ok = _sensors != NULL && _sensors->getCompass(row_compass) && row_compass.flat;
 
     const int visible = 7;
     int first = quick_contact_selected - 3;
@@ -1078,7 +1168,9 @@ class HomeScreen : public UIScreen {
 
       char dist[6];
       float relative_dir = 0.0f;
-      bool has_dir = getRelativeDirectionDeg(contact, relative_dir);
+      bool has_dir = getRelativeDirectionWith(row_compass, row_compass_ok,
+                                              contact.gps_lat / 1000000.0,
+                                              contact.gps_lon / 1000000.0, relative_dir);
       formatDistance(contact, dist, sizeof(dist));
 
       bool selected = first + row == quick_contact_selected;
@@ -1098,8 +1190,8 @@ class HomeScreen : public UIScreen {
 
   void renderQuickActionList(DisplayDriver& display) {
     QuickTarget target;
-    if (!getCurrentQuickTarget(currentQuickSelected(), target)) {
-      quick_stage = QUICK_TARGETS;
+    if (!resolvePinnedQuickTarget(target)) {
+      resetQuickSendStage();
       if (_page == HomePage::CHANNELS) renderChannelList(display);
       else renderGroupList(display);
       return;
@@ -1170,8 +1262,9 @@ class HomeScreen : public UIScreen {
 
   void sendQuickSelection() {
     QuickTarget target;
-    if (!getCurrentQuickTarget(currentQuickSelected(), target)) {
+    if (!resolvePinnedQuickTarget(target)) {
       _task->showAlert("No chat", 800);
+      resetQuickSendStage();
       return;
     }
 
@@ -1411,6 +1504,16 @@ class HomeScreen : public UIScreen {
 #endif
 #endif
 
+  // Leaving a quick-send context (page change, etc.) must drop the stage and
+  // pinned recipient, otherwise re-entering the page lands in a stale actions
+  // menu aimed at a target the user never picked on this visit.
+  void resetQuickSendStage() {
+#if UI_QUICK_SEND == 1
+    quick_stage = QUICK_TARGETS;
+    quick_pinned_valid = false;
+#endif
+  }
+
   bool isBatteryCharging() const {
 #ifdef PIN_BATTERY_CHARGING
     return digitalRead(PIN_BATTERY_CHARGING) == BATTERY_CHARGING_STATE_ON;
@@ -1428,48 +1531,6 @@ class HomeScreen : public UIScreen {
   }
 
   int batteryPercent(uint16_t batteryMilliVolts) const {
-#ifndef BATT_MIN_MILLIVOLTS
-  #define BATT_MIN_MILLIVOLTS 3000
-#endif
-#ifndef BATT_MAX_MILLIVOLTS
-  #define BATT_MAX_MILLIVOLTS 4200
-#endif
-#ifndef BATT_USE_OCV_PERCENT
-  #define BATT_USE_OCV_PERCENT 0
-#endif
-#ifndef BATT_OCV_100_MILLIVOLTS
-  #define BATT_OCV_100_MILLIVOLTS 4190
-#endif
-#ifndef BATT_OCV_90_MILLIVOLTS
-  #define BATT_OCV_90_MILLIVOLTS 4050
-#endif
-#ifndef BATT_OCV_80_MILLIVOLTS
-  #define BATT_OCV_80_MILLIVOLTS 3990
-#endif
-#ifndef BATT_OCV_70_MILLIVOLTS
-  #define BATT_OCV_70_MILLIVOLTS 3890
-#endif
-#ifndef BATT_OCV_60_MILLIVOLTS
-  #define BATT_OCV_60_MILLIVOLTS 3800
-#endif
-#ifndef BATT_OCV_50_MILLIVOLTS
-  #define BATT_OCV_50_MILLIVOLTS 3720
-#endif
-#ifndef BATT_OCV_40_MILLIVOLTS
-  #define BATT_OCV_40_MILLIVOLTS 3630
-#endif
-#ifndef BATT_OCV_30_MILLIVOLTS
-  #define BATT_OCV_30_MILLIVOLTS 3530
-#endif
-#ifndef BATT_OCV_20_MILLIVOLTS
-  #define BATT_OCV_20_MILLIVOLTS 3420
-#endif
-#ifndef BATT_OCV_10_MILLIVOLTS
-  #define BATT_OCV_10_MILLIVOLTS 3300
-#endif
-#ifndef BATT_OCV_0_MILLIVOLTS
-  #define BATT_OCV_0_MILLIVOLTS 3100
-#endif
 #if BATT_USE_OCV_PERCENT == 1
     static const uint16_t ocvMilliVolts[] = {
       BATT_OCV_100_MILLIVOLTS,
@@ -1661,6 +1722,13 @@ class HomeScreen : public UIScreen {
   bool compass_mode_is_compass = true;
   bool compass_mode_valid = false;
   unsigned long compass_filter_updated = 0;
+  // Last-drawn integer values: when the rendered numbers haven't changed we
+  // drop to the idle cadence — each full-frame I2C flush blocks the loop for
+  // ~50ms, so 10Hz is only paid while the compass is actually turning.
+  int compass_last_primary = -9999;   // heading (compass mode) or tilt
+  int compass_last_pitch = -9999;
+  int compass_last_roll = -9999;
+  bool compass_last_mode = true;
 
   static float clampFloat(float v, float min_v, float max_v) {
     if (v < min_v) return min_v;
@@ -1922,6 +1990,16 @@ public:
     }
   }
 
+  // True while a typing surface owns the keys (incoming messages must not
+  // switch screens out from under the user mid-compose).
+  bool isModalInputActive() const {
+#if UI_QUICK_SEND == 1
+    return quick_stage == QUICK_KEYBOARD;
+#else
+    return false;
+#endif
+  }
+
   // Smart GPS state -> short label (+countdown) for the GPS status box.
   void smartGpsLabel(uint8_t st, const SensorManager::GPSStatus& gs, bool live, char* dest, size_t size) {
     switch (st) {
@@ -1950,7 +2028,7 @@ public:
     char line[28];
     drawPageTitle(display, "GPS Status");
 
-    SensorManager::GPSStatus gs;
+    SensorManager::GPSStatus gs = {};  // zero-init: read below even when getGPSStatus() fails
     bool ok = (_sensors != NULL) && _sensors->getGPSStatus(gs);
     LocationProvider* nmea = (_sensors != NULL) ? _sensors->getLocationProvider() : NULL;
     int sat = (nmea != NULL) ? nmea->satellitesCount() : 0;
@@ -2300,23 +2378,35 @@ public:
       }
       display.setColor(DisplayDriver::LIGHT);
       display.setTextSize(2);
+      int primary_val;
       if (compass_mode) {
-        snprintf(tmp, sizeof(tmp), "%03d deg", ((int)(normalizeDeg(compass.heading_deg + UI_HEADING_RENDER_OFFSET_DEG) + 0.5f)) % 360);
+        primary_val = ((int)(normalizeDeg(compass.heading_deg + UI_HEADING_RENDER_OFFSET_DEG) + 0.5f)) % 360;
+        snprintf(tmp, sizeof(tmp), "%03d deg", primary_val);
       } else {
-        int tilt = (int)(antennaAlignmentTiltDeg(compass) + 0.5f);
-        snprintf(tmp, sizeof(tmp), "TILT %02d", tilt);
+        primary_val = (int)(antennaAlignmentTiltDeg(compass) + 0.5f);
+        snprintf(tmp, sizeof(tmp), "TILT %02d", primary_val);
       }
       display.drawTextCentered(display.width() / 2, 97, tmp);
       display.setTextSize(1);
       float pitch_status = compass_mode ? compass.pitch_deg : antennaPitchErrorDeg(compass.pitch_deg);
       pitch_status = deadbandFloat(pitch_status, UI_COMPASS_DISPLAY_DEADBAND_DEG);
       float roll_status = deadbandFloat(compass.roll_deg, UI_COMPASS_DISPLAY_DEADBAND_DEG);
+      int pitch_val = (int)(pitch_status + (pitch_status >= 0 ? 0.5f : -0.5f));
+      int roll_val = (int)(roll_status + (roll_status >= 0 ? 0.5f : -0.5f));
       snprintf(tmp, sizeof(tmp), "%s P%+03d R%+03d",
-              compassCalLabel(compass),
-              (int)(pitch_status + (pitch_status >= 0 ? 0.5f : -0.5f)),
-              (int)(roll_status + (roll_status >= 0 ? 0.5f : -0.5f)));
+              compassCalLabel(compass), pitch_val, roll_val);
       display.drawTextCentered(display.width() / 2, 119, tmp);
-      return UI_COMPASS_REFRESH_MS;
+
+      // Adaptive cadence: full rate only while the drawn values change.
+      bool changed = primary_val != compass_last_primary ||
+                     pitch_val != compass_last_pitch ||
+                     roll_val != compass_last_roll ||
+                     compass_mode != compass_last_mode;
+      compass_last_primary = primary_val;
+      compass_last_pitch = pitch_val;
+      compass_last_roll = roll_val;
+      compass_last_mode = compass_mode;
+      return changed ? UI_COMPASS_REFRESH_MS : UI_COMPASS_REFRESH_IDLE_MS;
 #endif
 #if UI_DIRECTIONAL_ANTENNA == 1
     } else if (_page == HomePage::DIRECTIONAL) {
@@ -2465,9 +2555,11 @@ public:
         if (quick_stage == QUICK_TARGETS) {
           if (count == 0) {
             _task->showAlert(_page == HomePage::CHANNELS ? "No text channels" : "No favorites", 800);
-          } else {
+          } else if (pinQuickTarget()) {  // capture recipient identity now
             quick_stage = QUICK_ACTIONS;
             quick_action_selected = 0;
+          } else {
+            _task->showAlert("No chat", 800);
           }
         } else {
           sendQuickSelection();
@@ -2516,10 +2608,12 @@ public:
 #endif
     if (c == KEY_LEFT || c == KEY_UP || c == KEY_PREV) {
       _page = (_page + HomePage::Count - 1) % HomePage::Count;
+      resetQuickSendStage();
       return true;
     }
     if (c == KEY_NEXT || c == KEY_RIGHT || c == KEY_DOWN) {
       _page = (_page + 1) % HomePage::Count;
+      resetQuickSendStage();
       if (_page == HomePage::RECENT) {
         _task->showAlert("Recent adverts", 800);
       }
@@ -2762,6 +2856,9 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
                                        GPS_SWITCH_BOOT_DEBOUNCE_MS,
                                        GPS_SWITCH_BOOT_OFF_CONFIRM_MS) &&
       applyGPSSwitchAction(initial_switch_state, false)) {
+    // true = boot-held OFF initiated shutdown. Abort init here: the screen
+    // objects (splash/home/msg_preview) are intentionally never constructed,
+    // so nothing below this point may be moved above the early return.
     return;
   } else if (initial_switch_state == GPS_SWITCH_UNKNOWN) {
     MESH_DEBUG_PRINTLN("UITask: GPS switch boot state unstable");
@@ -2895,7 +2992,13 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
 #endif
 
   ((MsgPreviewScreen *) msg_preview)->addPreview(path_len, from_name, text);
-  setCurrScreen(msg_preview);
+  // Don't yank the user out of a modal typing surface: the next keystroke
+  // would land in MsgPreviewScreen and could dismiss the whole unread queue.
+  // The preview stays queued; notification (LED/buzzer) still fires below.
+  bool typing = curr == home && home != NULL && ((HomeScreen *) home)->isModalInputActive();
+  if (!typing) {
+    setCurrScreen(msg_preview);
+  }
 
   if (_display != NULL) {
     if (!_display->isOn() && !hasConnection()) {
@@ -2910,9 +3013,15 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
 
 void UITask::userLedHandler() {
 #ifdef PIN_STATUS_LED
-  int cur_time = millis();
+  unsigned long cur_time = millis();
 #if STATUS_LED_HEARTBEAT_REQUIRES_GPS
-  if (!getGPSState()) {
+  // getGPSState() walks the sensor settings table (strcmp scan) — only
+  // re-check once per second instead of every loop() pass.
+  if ((long)(cur_time - next_led_gps_check) >= 0) {
+    led_gps_enabled = getGPSState();
+    next_led_gps_check = cur_time + 1000;
+  }
+  if (!led_gps_enabled) {
     if (led_state != 0) {
       led_state = 0;
       digitalWrite(PIN_STATUS_LED, !LED_STATE_ON);
@@ -2922,7 +3031,7 @@ void UITask::userLedHandler() {
     return;
   }
 #endif
-  if (cur_time > next_led_change) {
+  if ((long)(cur_time - next_led_change) >= 0) {
     if (led_state == 0) {
       led_state = 1;
       if (_msgcount > 0) {
@@ -3192,9 +3301,13 @@ char UITask::checkDisplayOn(char c) {
 char UITask::handleLongPress(char c) {
   if (millis() - ui_started_at < 8000) {   // long press in first 8 seconds since startup -> CLI/rescue
     the_mesh.enterCLIRescue();
-    c = 0;   // consume event
+    return 0;   // consume event
   }
-  return c;
+  // Long-press bindings include destructive actions (compass calibration,
+  // repeater ping TX, diagnostics). With the display off — e.g. squeezed in a
+  // pocket — just wake the screen and consume the event, mirroring
+  // checkDisplayOn() for short presses.
+  return checkDisplayOn(c);
 }
 
 char UITask::handleDoubleClick(char c) {
@@ -3286,15 +3399,6 @@ void UITask::setMsgLed(bool on) {
 void UITask::activeBuzzerBegin() {
   pinMode(PIN_ACTIVE_BUZZER, OUTPUT);
   activeBuzzerStop();
-}
-
-void UITask::activeBuzzerPlay(uint16_t duration_ms) {
-  if (active_buzzer_quiet || duration_ms == 0) return;
-  active_buzzer_pattern = NULL;
-  active_buzzer_pattern_len = 0;
-  active_buzzer_pattern_pos = 0;
-  digitalWrite(PIN_ACTIVE_BUZZER, ACTIVE_BUZZER_ON);
-  active_buzzer_until = millis() + duration_ms;
 }
 
 void UITask::activeBuzzerPlayPattern(const uint16_t* pattern, uint8_t pattern_len) {
