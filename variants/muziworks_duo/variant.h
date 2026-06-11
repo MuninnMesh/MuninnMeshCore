@@ -138,7 +138,10 @@
 #define GPS_EN                  (33)              // P1.01
 #define PIN_GPS_EN              GPS_EN
 #define GPS_RESET               (-1)
-#define PIN_GPS_SWITCH          (12)              // P0.12 / SWITCH_MODE2
+// NOTE: do NOT use as a boolean GPS switch (the upstream PIN_GPS_SWITCH
+// convention, e.g. ui-tiny digitalRead). This board has a 3-position switch
+// decoded from SWITCH_MODE1+SWITCH_MODE2 — use gps_switch_*() from target.h.
+#define PIN_GPS_SWITCH          (12)              // P0.12 / SWITCH_MODE2 only!
 #else
 #define HAS_GPS                 0
 #define PIN_GPS_TX              (-1)

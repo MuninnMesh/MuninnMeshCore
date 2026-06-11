@@ -22,6 +22,9 @@ protected:
   bool     gps_detected = false;
   bool     gps_active = false;
   uint32_t gps_update_interval_sec = 1;
+  // Non-zero while a GPS start is settling (GPS_START_DELAY_MS); the provider
+  // begin()/reset() happens in loop() so start_gps() never blocks the loop.
+  unsigned long gps_start_deferred_until = 0;
 
   #if ENV_INCLUDE_GPS
   LocationProvider* _location;

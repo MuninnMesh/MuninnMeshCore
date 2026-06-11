@@ -920,7 +920,14 @@ void EnvironmentSensorManager::start_gps() {
   #endif
 
 #if GPS_START_DELAY_MS > 0
-  delay(GPS_START_DELAY_MS);
+  // Defer the provider begin/reset to loop() instead of delay()-blocking the
+  // whole firmware here: with Smart GPS this path fires on every motion
+  // start, and a blocking delay stalls radio RX/TX and BLE for the duration.
+  if (gps_start_deferred_until == 0) {
+    gps_start_deferred_until = millis() + GPS_START_DELAY_MS;
+    if (gps_start_deferred_until == 0) gps_start_deferred_until = 1;
+  }
+  return;
 #endif
 
   _location->begin();
@@ -933,6 +940,7 @@ void EnvironmentSensorManager::start_gps() {
 
 void EnvironmentSensorManager::stop_gps() {
   gps_active = false;
+  gps_start_deferred_until = 0;  // cancel any settling start
   #ifdef RAK_WISBLOCK_GPS
     pinMode(gpsResetPin, OUTPUT);
     digitalWrite(gpsResetPin, LOW);
@@ -953,7 +961,17 @@ void EnvironmentSensorManager::loop() {
   #if ENV_INCLUDE_GPS
   static long next_gps_update = 0;
   if (gps_active) {
-    _location->loop();
+    if (gps_start_deferred_until != 0) {
+      // GPS start is settling (GPS_START_DELAY_MS): the provider hasn't been
+      // begun yet, so don't poll it until the deadline passes.
+      if ((long)(millis() - gps_start_deferred_until) >= 0) {
+        gps_start_deferred_until = 0;
+        _location->begin();
+        _location->reset();
+      }
+    } else {
+      _location->loop();
+    }
   }
   if (millis() > next_gps_update) {
 

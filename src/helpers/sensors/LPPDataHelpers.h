@@ -136,21 +136,27 @@ public:
     m = getFloat(&_buf[_pos], 2, 1, true); _pos += 2;
     return _pos <= _len;
   }
+  // These check bounds BEFORE dereferencing (telemetry payloads arrive over
+  // the mesh and can be truncated). The older readers above keep the upstream
+  // read-then-check pattern; fix those in an upstream-able pass.
   bool readDirection(float& degrees) {
+    if (_pos + 2 > _len) return false;
     degrees = getFloat(&_buf[_pos], 2, 1, false); _pos += 2;
-    return _pos <= _len;
+    return true;
   }
   bool readAccelerometer(float& x, float& y, float& z) {
+    if (_pos + 6 > _len) return false;
     x = getFloat(&_buf[_pos], 2, 1000, true); _pos += 2;
     y = getFloat(&_buf[_pos], 2, 1000, true); _pos += 2;
     z = getFloat(&_buf[_pos], 2, 1000, true); _pos += 2;
-    return _pos <= _len;
+    return true;
   }
   bool readGyrometer(float& x, float& y, float& z) {
+    if (_pos + 6 > _len) return false;
     x = getFloat(&_buf[_pos], 2, 100, true); _pos += 2;
     y = getFloat(&_buf[_pos], 2, 100, true); _pos += 2;
     z = getFloat(&_buf[_pos], 2, 100, true); _pos += 2;
-    return _pos <= _len;
+    return true;
   }
 
   void skipData(uint8_t type) {

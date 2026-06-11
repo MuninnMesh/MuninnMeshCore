@@ -14,6 +14,9 @@ void SH1107Display::setScreenPower(bool on)
 #ifdef PIN_SCREEN_ENABLE
   pinMode(PIN_SCREEN_ENABLE, OUTPUT);
   digitalWrite(PIN_SCREEN_ENABLE, on ? _screenPowerActive : !_screenPowerActive);
+  _railOn = on;
+#else
+  _railOn = true;  // no switchable rail: panel is always powered
 #endif
 }
 
@@ -68,8 +71,13 @@ void SH1107Display::turnOn()
 {
   if (!_begun) return;
 
-  setScreenPower(true);
-  delay(SCREEN_ENABLE_SETTLE_MS);
+  // turnOff() keeps the rail asserted, so the normal sleep->wake path needs
+  // no settle time. Only block for SCREEN_ENABLE_SETTLE_MS when the rail was
+  // genuinely off — otherwise every screen wake stalls the whole loop 250ms.
+  if (!_railOn) {
+    setScreenPower(true);
+    delay(SCREEN_ENABLE_SETTLE_MS);
+  }
   display.oled_command(SH110X_DISPLAYON);
   applyFlickerTuning();
   _isOn = true;

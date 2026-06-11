@@ -35,6 +35,7 @@ class SH1107Display : public DisplayDriver
   Adafruit_SH1107 display;
   bool _isOn;
   bool _begun;
+  bool _railOn;
   uint8_t _i2cAddress;
   uint8_t _screenPowerActive;
   uint8_t _color;
@@ -47,6 +48,7 @@ public:
   SH1107Display() : DisplayDriver(128, 128), display(128, 128, &Wire, PIN_OLED_RESET) {
     _isOn = false;
     _begun = false;
+    _railOn = false;
     _i2cAddress = DISPLAY_ADDRESS;
     _screenPowerActive = SCREEN_ENABLE_ACTIVE;
   }
