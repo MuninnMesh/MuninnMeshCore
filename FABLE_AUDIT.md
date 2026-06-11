@@ -143,27 +143,30 @@ Switch decode + debounce/grace wrap-safety; battery ADC math & LPCOMP threshold;
 
 ## Implementation plan
 
-**Phase A — power & hard breaks (this session):**
-- [ ] A1 F-01 CLI-rescue gate for USB companion builds
-- [ ] A2 F-02+F-06 `initiateShutdown()` rail/pull/buzzer/serial cleanup
-- [ ] A3 F-03 Smart GPS hard no-fix stop + motion re-arm
-- [ ] A4 F-05 compass page skip-flush deadband
+**Phase A — power & hard breaks (DONE, commit `333be0c2` + `6483f527`):**
+- [x] A1 F-01 CLI-rescue gate for USB companion builds
+- [x] A2 F-02+F-06 `initiateShutdown()` rail/pull/buzzer/serial cleanup
+- [x] A3 F-03 Smart GPS hard no-fix stop (10 min) + 5 min retry backoff
+- [x] A4 F-05 compass page adaptive cadence (10 Hz only while values change, else 250 ms)
 
-**Phase B — medium bugs (this session):**
-- [ ] B1 F-08+F-09 QSPI patch script: Uno chip entry, import-time patch + verifier, no fleet-wide Exit
-- [ ] B2 F-10 IMU-failure → plain GPS fallback at ON-GPS
-- [ ] B3 F-12 calibration-failure state restore
-- [ ] B4 F-13 telemetry heading validity gate
-- [ ] B5 F-15/F-16 quick-send stage reset + pubkey-pinned target
-- [ ] B6 F-18 SH1107 turnOn settle skip
-- [ ] B7 F-19 platformio BLE `extends` + F-29 dead flag/code removal
-- [ ] B8 F-21/F-22/F-23/F-24/F-25/F-26/F-27/F-28 UI small fixes
-- [ ] B9 F-20 age-formatter consolidation (+ delete `formatAge`)
-- [ ] B10 F-33/F-35/F-39/F-41/F-42 small contract/idiom/docs fixes
-- [ ] B11 F-11 non-blocking GPS start (needs care; placement Q to SYSENG)
+**Phase B — medium bugs (DONE, commits `6483f527` + `93038fd0`):**
+- [x] B1 F-08+F-09 QSPI patch script: Uno W25Q32JVSS entry, import-time patch + pre-ELF verifier, Muzi-only hard fail
+- [x] B2 F-10 IMU-failure → plain always-on GPS fallback at ON-GPS
+- [x] B3 F-12 calibration-failure restores persisted good cal
+- [x] B4 F-13 telemetry heading validity gate
+- [x] B5 F-15/F-16 quick-send stage reset + pubkey-pinned recipient
+- [x] B6 F-18 SH1107 turnOn settle skip (rail-state tracked)
+- [x] B7 F-19 platformio Duo BLE `extends` USB (defines verified identical) + F-29 dead flag/method removal
+- [x] B8 F-21/F-22/F-23/F-24/F-25/F-26/F-27/F-28 UI small fixes
+- [x] B9 F-20 (partial) deleted dead/buggy `formatAge`; upstream inline blocks left untouched to avoid merge noise
+- [x] B10 F-33/F-35/F-39/F-40(comment)/F-41/F-42 contract/idiom/docs fixes
+- [x] B11 F-11 non-blocking GPS start (provider begin deferred to sensor loop)
+- [x] F-17 (light) one compass fetch per frame + 2 s recently-heard throttle in renderGroupList
+
+**Build validation:** `muziworks_duo_super_io_companion_radio_ble`, `..._usb`, `muziworks_uno_super_io_companion_radio_ble` — all SUCCESS; BLE env defines verified unchanged after the `extends` refactor via `pio project metadata`.
 
 **Phase C — routed to SYSENG (Q posted in `_chat`):** F-04 IMU power config; F-07 wake source after SYSTEMOFF; F-32 battery pin buffer; F-34 IMU I2C recovery; F-36 axis verification; F-37 cal-record frame config; Serial1 park / back-powering confirm (part of F-02).
 
 **Decisions for MANAGER:** F-14 location-telemetry-with-GPS-off policy; F-44 USB VID/PID; (existing: splash licensing, QSPI capacity).
 
-**Deferred (tracked, not this session):** F-17 full ordinal-cache refactor (light version only: hoist compass read + recently-heard timer); F-30 list-screen helper consolidation; F-38 CompassReading API cleanup; F-40 wear-comment only; F-43 docs extraction.
+**Deferred (tracked, not this session):** F-17 full ordinal-cache refactor (light version landed); F-20 renderCompassPage/input-handler extraction (pure structure, no behavior change); F-30 list-screen helper consolidation; F-38 CompassReading API cleanup; F-43 docs extraction (cal file format + heading-validity enum for client apps).

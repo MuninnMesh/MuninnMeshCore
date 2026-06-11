@@ -2423,6 +2423,10 @@ bool MyMesh::hasNonEmptyLocation(double lat, double lon) const {
          lon >= -180.0 && lon <= 180.0;
 }
 
+// Flash-wear note: while continuously moving this rewrites the prefs file
+// every GPS_LOCATION_PERSIST_INTERVAL_MS (120s) => ~720 LittleFS writes/day
+// worst case. InternalFS wear-levels across the FS region, so this is within
+// budget, but don't shorten the interval without re-doing that math.
 void MyMesh::maybePersistLatestLocation() {
 #if ENV_INCLUDE_GPS == 1
   if (!hasNonEmptyLocation(sensors.node_lat, sensors.node_lon)) return;
