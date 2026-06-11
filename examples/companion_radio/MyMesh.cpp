@@ -2486,12 +2486,25 @@ void MyMesh::checkSerialInterface() {
   }
 }
 
+// CLI-rescue auto-enter is only safe when the companion app does NOT talk over
+// USB Serial itself (BLE / WiFi / aux-UART builds). On USB companion builds the
+// app's first frame would land in Serial.available() and trap the device in
+// rescue mode (no exit besides reboot, recurring on the next frame). USB builds
+// still reach rescue via the UI long-press path (enterCLIRescue()).
+#if defined(WIFI_SSID) || defined(BLE_PIN_CODE) || defined(SERIAL_RX)
+  #define CLI_RESCUE_AUTOENTER 1
+#else
+  #define CLI_RESCUE_AUTOENTER 0
+#endif
+
 void MyMesh::loop() {
   BaseChatMesh::loop();
 
+#if CLI_RESCUE_AUTOENTER
   if (!_cli_rescue && Serial.available()) {
     enterCLIRescue();
   }
+#endif
 
   if (_cli_rescue) {
     checkCLIRescueCmd();

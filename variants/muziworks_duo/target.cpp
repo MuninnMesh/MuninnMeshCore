@@ -117,6 +117,18 @@ static void muzi_rtc_begin() {
 #ifndef MUZIWORKS_SMART_GPS_REQUIRE_PERSISTED_FIX_BEFORE_STOP
 #define MUZIWORKS_SMART_GPS_REQUIRE_PERSISTED_FIX_BEFORE_STOP 1
 #endif
+// Hard cap on a fixless acquisition episode. This applies even when
+// REQUIRE_PERSISTED_FIX_BEFORE_STOP is set — without it the receiver runs
+// until the battery dies whenever a fix is unobtainable (indoors, garage,
+// heavy canopy), which is the most likely real-world drain scenario.
+#ifndef MUZIWORKS_SMART_GPS_NO_FIX_HARD_STOP_MS
+#define MUZIWORKS_SMART_GPS_NO_FIX_HARD_STOP_MS 600000UL
+#endif
+// After a fixless give-up, hold off this long before motion may retry GPS,
+// so continuous indoor motion doesn't immediately restart the receiver.
+#ifndef MUZIWORKS_SMART_GPS_NO_FIX_RETRY_BACKOFF_MS
+#define MUZIWORKS_SMART_GPS_NO_FIX_RETRY_BACKOFF_MS 300000UL
+#endif
 #ifndef MUZIWORKS_GPS_TIME_FRESH_MS
 #define MUZIWORKS_GPS_TIME_FRESH_MS 3600000UL
 #endif
@@ -137,6 +149,7 @@ class MuziWorksDuoSensorManager : public EnvironmentSensorManager {
   uint32_t smart_gps_min_on_ms = MUZIWORKS_SMART_GPS_MIN_ON_MS;
   uint32_t smart_gps_no_fix_timeout_ms = MUZIWORKS_SMART_GPS_NO_FIX_TIMEOUT_MS;
   uint32_t smart_gps_boot_start_delay_ms = MUZIWORKS_SMART_GPS_BOOT_START_DELAY_MS;
+  uint32_t smart_gps_retry_blocked_until_ms = 0;  // 0 = no fixless-give-up backoff active
 
   struct PowerProfileConfig {
     uint16_t motion_seconds;
@@ -221,7 +234,9 @@ public:
     bool ok = EnvironmentSensorManager::querySensors(requester_permissions, telemetry);
     SensorManager::CompassReading reading = {};
     if ((requester_permissions & TELEM_PERM_ENVIRONMENT) && getCompass(reading)) {
-      if (reading.flat) {
+      // Gate on heading validity, not just `flat`: an uncalibrated unit lying
+      // flat would otherwise broadcast a confident 0 deg (due north).
+      if (reading.flat && reading.heading_validity == SensorManager::COMPASS_HEADING_VALID) {
         telemetry.addDirection(next_available_channel++, reading.heading_deg);
       }
       const float* acc_g = compass_imu.accelG();
@@ -254,13 +269,17 @@ public:
   bool setSettingValue(const char* name, const char* value) override {
 #if MUZIWORKS_SMART_GPS && ENV_INCLUDE_GPS == 1
     if (strcmp(name, "gps") == 0) {
+      MESH_DEBUG_PRINTLN("Muzi smart GPS owns GPS setting; requested=%s active=%d", value, gps_active ? 1 : 0);
       if (strcmp(value, "0") == 0) {
         stop_gps();
         smart_gps_started_ms = 0;
         smart_gps_stationary_since_ms = 0;
+        return true;
       }
-      MESH_DEBUG_PRINTLN("Muzi smart GPS owns GPS setting; requested=%s active=%d", value, gps_active ? 1 : 0);
-      return true;
+      // Smart GPS owns the receiver: a manual enable isn't honored, so don't
+      // ack it as success — clients would otherwise see gps=0 right after a
+      // successful-looking enable.
+      return false;
     }
 #endif
     if (strcmp(name, "compass_cal") == 0) {
@@ -425,14 +444,34 @@ private:
     smart_gps_motion_arming_seconds = 0;
     smart_gps_idle_shutdown_seconds = 0;
 
-    if (!permitted || !compass_imu.isInitialized()) {
+    if (!permitted) {
       if (gps_active) {
         MESH_DEBUG_PRINTLN("Muzi smart GPS stop: not permitted state=%d", (int)switch_state);
         stop_gps();
       }
       smart_gps_started_ms = 0;
       smart_gps_stationary_since_ms = 0;
-      smart_gps_state = permitted ? SensorManager::SMART_GPS_UNAVAILABLE : SensorManager::SMART_GPS_NOT_PERMITTED;
+      smart_gps_retry_blocked_until_ms = 0;  // switch toggle = fresh consent, drop any backoff
+      smart_gps_state = SensorManager::SMART_GPS_NOT_PERMITTED;
+      publishSmartGPSStatus();
+      return;
+    }
+
+    if (!compass_imu.isInitialized()) {
+      // IMU fault must not disable GPS: the ON-GPS detent is explicit power
+      // consent, so degrade to plain always-on GPS (no motion duty-cycling)
+      // instead of leaving the receiver permanently off.
+      if (!gps_active && (int32_t)(now - smart_gps_start_allowed_ms) >= 0) {
+        start_gps();
+        smart_gps_started_ms = now;
+        MESH_DEBUG_PRINTLN("Muzi smart GPS fallback: IMU unavailable, GPS always-on");
+      }
+      if (gps_active) {
+        bool fb_fix = _location != NULL && _location->isValid();
+        smart_gps_state = fb_fix ? SensorManager::SMART_GPS_ACTIVE : SensorManager::SMART_GPS_ACQUIRING;
+      } else {
+        smart_gps_state = SensorManager::SMART_GPS_UNAVAILABLE;
+      }
       publishSmartGPSStatus();
       return;
     }
@@ -449,15 +488,23 @@ private:
     if (moving) {
       smart_gps_stationary_since_ms = 0;
       if (!gps_active) {
-        start_gps();
-        smart_gps_started_ms = now;
-        MESH_DEBUG_PRINTLN("Muzi smart GPS start: sustained movement");
+        if (smart_gps_retry_blocked_until_ms != 0 &&
+            (int32_t)(now - smart_gps_retry_blocked_until_ms) < 0) {
+          // Fixless give-up backoff: don't let continuous motion immediately
+          // re-power a receiver that just spent the hard-stop window with no fix.
+        } else {
+          smart_gps_retry_blocked_until_ms = 0;
+          start_gps();
+          smart_gps_started_ms = now;
+          MESH_DEBUG_PRINTLN("Muzi smart GPS start: sustained movement");
+        }
       }
     } else if (gps_active && smart_gps_stationary_since_ms == 0) {
       smart_gps_stationary_since_ms = now;
     }
 
     bool fix_valid = _location != NULL && _location->isValid();
+    if (fix_valid) smart_gps_retry_blocked_until_ms = 0;
     if (gps_active) {
       bool stationary_hold_elapsed = smart_gps_stationary_since_ms != 0 &&
         (uint32_t)(now - smart_gps_stationary_since_ms) >= smart_gps_stationary_hold_ms;
@@ -475,11 +522,21 @@ private:
         !MUZIWORKS_SMART_GPS_REQUIRE_PERSISTED_FIX_BEFORE_STOP && no_fix_timeout;
       bool may_stop_after_persist =
         stationary_hold_elapsed && persisted_since_start;
+      // Hard give-up: fires regardless of motion or the persisted-fix
+      // requirement, so a fixless episode can never run the receiver forever.
+      bool no_fix_hard_stop = !fix_valid && smart_gps_started_ms != 0 &&
+        (uint32_t)(now - smart_gps_started_ms) >= MUZIWORKS_SMART_GPS_NO_FIX_HARD_STOP_MS;
 
-      if (!moving && min_on_elapsed && (may_stop_after_persist || may_stop_without_fix)) {
-        MESH_DEBUG_PRINTLN("Muzi smart GPS stop: stationary=%d no_fix=%d",
+      if ((!moving && min_on_elapsed && (may_stop_after_persist || may_stop_without_fix)) ||
+          no_fix_hard_stop) {
+        MESH_DEBUG_PRINTLN("Muzi smart GPS stop: stationary=%d no_fix=%d hard_stop=%d",
                            stationary_hold_elapsed ? 1 : 0,
-                           no_fix_timeout ? 1 : 0);
+                           no_fix_timeout ? 1 : 0,
+                           no_fix_hard_stop ? 1 : 0);
+        if (no_fix_hard_stop || no_fix_timeout) {
+          smart_gps_retry_blocked_until_ms = now + MUZIWORKS_SMART_GPS_NO_FIX_RETRY_BACKOFF_MS;
+          if (smart_gps_retry_blocked_until_ms == 0) smart_gps_retry_blocked_until_ms = 1;
+        }
         stop_gps();
         smart_gps_started_ms = 0;
         smart_gps_stationary_since_ms = 0;

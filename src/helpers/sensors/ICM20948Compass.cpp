@@ -626,12 +626,20 @@ void ICM20948Compass::finishCompassCalibration() {
     mag_cal_final_quality = mag_cal_quality;
     MESH_DEBUG_PRINTLN("Muzi ICM-20948 compass calibration saved");
   } else {
-    mag_cal_valid = false;
-    mag_cal_state = SensorManager::COMPASS_CAL_BAD;
-    mag_cal_quality = calibrationQualityFor(mag_cal_min, mag_cal_max, mag_cal_samples);
+    // The run failed (poor coverage or FS error). Report POOR for the run,
+    // but restore the previously persisted calibration instead of leaving the
+    // compass UNCALIBRATED until reboot — mirrors cancelCalibration()'s
+    // keep-the-last-good-result behavior.
+    uint8_t run_quality = calibrationQualityFor(mag_cal_min, mag_cal_max, mag_cal_samples);
+    if (!loadCompassCalibration()) {
+      mag_cal_valid = false;
+      mag_cal_state = SensorManager::COMPASS_CAL_BAD;
+      mag_cal_quality = run_quality;
+    }
     mag_cal_result = SensorManager::COMPASS_CAL_RESULT_POOR;
-    mag_cal_final_quality = mag_cal_quality;
-    MESH_DEBUG_PRINTLN("Muzi ICM-20948 compass calibration failed");
+    mag_cal_final_quality = run_quality;
+    MESH_DEBUG_PRINTLN("Muzi ICM-20948 compass calibration failed (restored=%d)",
+                       mag_cal_valid ? 1 : 0);
   }
   mag_cal_result_until_ms = millis() + MUZIWORKS_COMPASS_CAL_RESULT_HOLD_MS;
   mag_cal_step = 0;
@@ -948,7 +956,9 @@ bool ICM20948Compass::update(bool force) {
     }
   }
 
-  if (!force && now < next_imu_update) return last_imu_update != 0;
+  // Signed-diff comparison is millis()-wraparound-safe (matches the idiom
+  // used by the other timers in this file).
+  if (!force && (int32_t)(now - next_imu_update) < 0) return last_imu_update != 0;
   next_imu_update = now + MUZIWORKS_ICM20948_UPDATE_MS;
 
   if (!imu.dataReady() && !force) {
