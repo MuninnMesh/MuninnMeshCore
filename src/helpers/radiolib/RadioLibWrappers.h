@@ -12,15 +12,28 @@ protected:
   uint16_t _num_floor_samples;
   int32_t _floor_sample_sum;
   uint8_t _preamble_sf;
+  uint32_t _tx_deadline;   // 0 = no TX in flight; else millis() deadline to force TX recovery
+  uint16_t _n_rx_recovered;   // missed RX_DONE edges recovered by the loop() backstop
+  uint16_t _n_tx_timeouts;    // TX-done timeouts recovered by isSendComplete()
 
   void idle();
   void startRecv();
   float packetScoreInt(float snr, int sf, int packet_len);
   virtual bool isReceivingPacket() =0;
   virtual void doResetAGC();
+  // Safety net for a missed packet-received (DIO1) edge: return true if the chip
+  // still has an unhandled RX_DONE latched. Default false (no backstop); the
+  // LR1121 wrapper overrides it. See loop().
+  virtual bool isRxDonePending() { return false; }
 
 public:
-  RadioLibWrapper(PhysicalLayer& radio, mesh::MainBoard& board) : _radio(&radio), _board(&board), _preamble_sf(0) { n_recv = n_sent = 0; }
+  RadioLibWrapper(PhysicalLayer& radio, mesh::MainBoard& board) : _radio(&radio), _board(&board), _preamble_sf(0), _tx_deadline(0), _n_rx_recovered(0), _n_tx_timeouts(0) { n_recv = n_sent = n_recv_errors = 0; }
+
+  // Radio-health counters: how often the missed-IRQ safety nets have fired.
+  uint16_t getRxRecoveredCount() const { return _n_rx_recovered; }
+  uint16_t getTxTimeoutCount() const { return _n_tx_timeouts; }
+  // Stale RX-latch clears (LR11x0-specific); wrappers that track it override.
+  virtual uint16_t getRxLatchClears() const { return 0; }
 
   void begin() override;
   virtual void powerOff() { _radio->sleep(); }
