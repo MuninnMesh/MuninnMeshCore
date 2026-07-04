@@ -3,6 +3,13 @@
 
 #include "MyMesh.h"
 
+#if defined(ESP32) && defined(TASK_WDT_TIMEOUT_SECS)
+  #include <esp_task_wdt.h>
+#endif
+#if defined(ESP32) && defined(ENABLE_WIFI_OTA)
+  #include <helpers/ESP32WiFiOTA.h>
+#endif
+
 #ifdef DISPLAY_CLASS
   #include "UITask.h"
   static UITask ui_task(display);
@@ -21,6 +28,10 @@ static char command[160];
 
 // For power saving
 unsigned long POWERSAVING_FIRSTSLEEP_SECS = 120; // The first sleep (if enabled) from boot
+
+#ifndef INITIAL_ADVERT_DELAY_MS
+  #define INITIAL_ADVERT_DELAY_MS 16000
+#endif
 
 #if defined(PIN_USER_BTN) && defined(_SEEED_SENSECAP_SOLAR_H_)
 static unsigned long userBtnDownAt = 0;
@@ -97,22 +108,46 @@ void setup() {
 
   // send out initial zero hop Advertisement to the mesh
 #if ENABLE_ADVERT_ON_BOOT == 1
-  the_mesh.sendSelfAdvertisement(16000, false);
+  the_mesh.sendSelfAdvertisement(INITIAL_ADVERT_DELAY_MS, false);
 #endif
 
   board.onBootComplete();
+
+#if defined(ESP32) && defined(TASK_WDT_TIMEOUT_SECS)
+  // Watch the main loop task: an unattended node that hard-hangs recovers by
+  // reset (and the event lands in the 'resets' tally) instead of staying dead.
+  {
+    esp_task_wdt_config_t wdt_cfg;
+    memset(&wdt_cfg, 0, sizeof(wdt_cfg));
+    wdt_cfg.timeout_ms = TASK_WDT_TIMEOUT_SECS * 1000UL;
+    wdt_cfg.trigger_panic = true;
+    if (esp_task_wdt_reconfigure(&wdt_cfg) != ESP_OK) {
+      esp_task_wdt_init(&wdt_cfg);
+    }
+    esp_task_wdt_add(NULL);
+  }
+#endif
 }
 
 void loop() {
+#if defined(ESP32) && defined(TASK_WDT_TIMEOUT_SECS)
+  esp_task_wdt_reset();
+#endif
   int len = strlen(command);
   while (Serial.available() && len < sizeof(command)-1) {
     char c = Serial.read();
-    if (c != '\n') {
+    if (c == '\r' || c == '\n') {
+      if (len == 0) {
+        continue;
+      }
+      command[len++] = '\r';
+      command[len] = 0;
+      break;
+    } else {
       command[len++] = c;
       command[len] = 0;
       Serial.print(c);
     }
-    if (c == '\r') break;
   }
   if (len == sizeof(command)-1) {  // command buffer full
     command[sizeof(command)-1] = '\r';
@@ -147,12 +182,19 @@ void loop() {
 
   the_mesh.loop();
   sensors.loop();
+#if defined(ESP32) && defined(ENABLE_WIFI_OTA)
+  WiFiOTA::loop();
+#endif
 #ifdef DISPLAY_CLASS
   ui_task.loop();
 #endif
   rtc_clock.tick();
 
-  if (the_mesh.getNodePrefs()->powersaving_enabled && !the_mesh.hasPendingWork()) {
+  bool ota_busy = false;
+#if defined(ESP32) && defined(ENABLE_WIFI_OTA)
+  ota_busy = WiFiOTA::isActive();   // light sleep would drop the STA link mid-OTA
+#endif
+  if (the_mesh.getNodePrefs()->powersaving_enabled && !the_mesh.hasPendingWork() && !ota_busy) {
 #if defined(NRF52_PLATFORM)
     board.sleep(0); // nrf ignores seconds param, sleeps whenever possible
 #else

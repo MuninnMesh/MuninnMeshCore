@@ -45,6 +45,8 @@
   #define TELEM_REPLY_ZEROHOP_DEFAULT 0
 #endif
 
+#define RESET_TALLY_SLOTS 11   // esp_reset_reason_t values 0..10 (last slot = catch-all)
+
 #define FIRMWARE_VER_LEVEL       2
 
 #define REQ_TYPE_GET_STATUS         0x01 // same as _GET_STATS
@@ -959,6 +961,10 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 #else
   _prefs.rx_boosted_gain = 1; // enabled by default;
 #endif
+#elif defined(USE_LR1121) && defined(RX_BOOSTED_GAIN)
+  // Without this the pref defaults to 0 on LR1121 builds and begin() then
+  // DISABLES the boosted LNA that the target just enabled (~2dB RX loss).
+  _prefs.rx_boosted_gain = (RX_BOOSTED_GAIN) ? 1 : 0;
 #endif
 
   pending_discover_tag = 0;
@@ -972,6 +978,68 @@ void MyMesh::begin(FILESYSTEM *fs) {
   _fs = fs;
   // load persisted prefs
   _cli.loadPrefs(_fs);
+
+#if defined(USE_LR1121) && defined(RX_BOOSTED_GAIN)
+  // Self-heal prefs saved by builds that never initialized rx_boosted_gain on
+  // LR1121 (the ctor default above was SX126x-only): those files hold 0 and
+  // would silently run the LNA un-boosted. Boosted RX is the intended state
+  // for this hardware; costs ~1mA, buys ~2dB sensitivity.
+  if (_prefs.rx_boosted_gain != 1) {
+    _prefs.rx_boosted_gain = 1;
+    _cli.savePrefs(_fs);
+  }
+#endif
+
+#ifdef ESP32
+  // Persisted reset-reason tally (see 'resets' CLI command): distinguishes
+  // brownouts / watchdog resets / panics from clean power-ups in the field.
+  {
+    uint32_t counts[RESET_TALLY_SLOTS];
+    memset(counts, 0, sizeof(counts));
+    File f = _fs->open("/reset_tally");
+    if (f) {
+      f.read((uint8_t *)counts, sizeof(counts));
+      f.close();
+    }
+    int reason = (int)esp_reset_reason();
+    if (reason < 0 || reason >= RESET_TALLY_SLOTS) reason = RESET_TALLY_SLOTS - 1;
+    counts[reason]++;
+#if defined(RP2040_PLATFORM)
+    File wf = _fs->open("/reset_tally", "w");
+#elif defined(NRF52_PLATFORM)
+    File wf = _fs->open("/reset_tally", FILE_O_WRITE);
+#else
+    File wf = _fs->open("/reset_tally", "w", true);
+#endif
+    if (wf) {
+      wf.write((const uint8_t *)counts, sizeof(counts));
+      wf.close();
+    }
+  }
+#endif
+
+#if defined(LOCK_RADIO_PARAMS_TO_BUILD) && LOCK_RADIO_PARAMS_TO_BUILD
+  bool radio_prefs_changed = false;
+  radio_prefs_changed |= _prefs.freq != LORA_FREQ;
+  radio_prefs_changed |= _prefs.bw != LORA_BW;
+  radio_prefs_changed |= _prefs.sf != LORA_SF;
+  radio_prefs_changed |= _prefs.cr != LORA_CR;
+
+  _prefs.freq = LORA_FREQ;
+  _prefs.bw = LORA_BW;
+  _prefs.sf = LORA_SF;
+  _prefs.cr = LORA_CR;
+
+  if (radio_prefs_changed) {
+    MESH_DEBUG_PRINTLN("Locked radio prefs: freq=%.3f bw=%.1f sf=%u cr=%u",
+                       _prefs.freq,
+                       _prefs.bw,
+                       (uint32_t)_prefs.sf,
+                       (uint32_t)_prefs.cr);
+    _cli.savePrefs(_fs);
+  }
+#endif
+
   acl.load(_fs, self_id);
   // TODO: key_store.begin();
   region_map.load(_fs);
@@ -1193,8 +1261,38 @@ void MyMesh::formatRadioStatsReply(char *reply) {
 }
 
 void MyMesh::formatPacketStatsReply(char *reply) {
-  StatsFormatHelper::formatPacketStats(reply, radio_driver, getNumSentFlood(), getNumSentDirect(), 
+  StatsFormatHelper::formatPacketStats(reply, radio_driver, getNumSentFlood(), getNumSentDirect(),
                                        getNumRecvFlood(), getNumRecvDirect());
+}
+
+void MyMesh::formatErrStatsReply(char *reply) {
+  // Radio safety-net fire counts. Non-zero values are normal in small numbers;
+  // rapid growth means the underlying condition (missed IRQ edges, stale RX
+  // latch, congested channel) deserves a look.
+  sprintf(reply, "latch_clr=%u rx_rec=%u tx_to=%u err_flags=0x%02x",
+          (uint32_t) radio_driver.getRxLatchClears(),
+          (uint32_t) radio_driver.getRxRecoveredCount(),
+          (uint32_t) radio_driver.getTxTimeoutCount(),
+          (uint32_t) _err_flags);
+}
+
+void MyMesh::formatResetTallyReply(char *reply) {
+#ifdef ESP32
+  uint32_t counts[RESET_TALLY_SLOTS];
+  memset(counts, 0, sizeof(counts));
+  File f = _fs->open("/reset_tally");
+  if (f) {
+    f.read((uint8_t *)counts, sizeof(counts));
+    f.close();
+  }
+  // esp_reset_reason_t: 1=power-on, 3=sw, 4=panic, 5/6/7=watchdogs, 8=deepsleep, 9=brownout
+  sprintf(reply, "pwr=%lu sw=%lu panic=%lu wdt=%lu brown=%lu other=%lu",
+          (unsigned long)counts[1], (unsigned long)counts[3], (unsigned long)counts[4],
+          (unsigned long)(counts[5] + counts[6] + counts[7]), (unsigned long)counts[9],
+          (unsigned long)(counts[0] + counts[2] + counts[8] + counts[RESET_TALLY_SLOTS-1]));
+#else
+  strcpy(reply, "n/a");
+#endif
 }
 
 void MyMesh::saveIdentity(const mesh::LocalIdentity &new_id) {

@@ -41,16 +41,20 @@ void AutoDiscoverRTCClock::begin(TwoWire& wire) {
     rv3028_success = true;
   }
 
+#if !defined(DISABLE_PCF8563_PROBE)
   if (i2c_probe(wire, PCF8563_ADDRESS)) {
     rtc_8563_success = rtc_8563.begin(&wire);
   }
+#endif
 
+#if !defined(DISABLE_RX8130CE_PROBE)
   if (i2c_probe(wire, RX8130CE_ADDRESS)) {
     MESH_DEBUG_PRINTLN("RX8130CE: Found");
     rtc_8130.begin(&wire);
     rtc_8130_success = true;
     MESH_DEBUG_PRINTLN("RX8130CE: Initialized");
   }
+#endif
 }
 
 uint32_t AutoDiscoverRTCClock::getCurrentTime() {

@@ -116,6 +116,17 @@ public:
   virtual void setRxBoostedGain(bool enable) {
     // no op by default
   };
+
+  // Radio-driver health counters (safety-net recoveries etc.); targets that
+  // track them override this. Default: not supported.
+  virtual void formatErrStatsReply(char* reply) {
+    strcpy(reply, "n/a");
+  }
+
+  // Persisted MCU reset-reason tally; ESP32 targets override. Default: not supported.
+  virtual void formatResetTallyReply(char* reply) {
+    strcpy(reply, "n/a");
+  }
 };
 
 class CommonCLI {
