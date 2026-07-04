@@ -4,6 +4,9 @@
 #include "AdvertDataHelpers.h"
 #include "TxtDataHelpers.h"
 #include <RTClib.h>
+#if defined(ESP32) && defined(ENABLE_WIFI_OTA)
+  #include "ESP32WiFiOTA.h"
+#endif
 
 #ifndef BRIDGE_MAX_BAUD
 #define BRIDGE_MAX_BAUD 115200
@@ -245,6 +248,14 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
         strcpy(reply, "ERR: clock cannot go backwards");
       }
     } else if (memcmp(command, "start ota", 9) == 0) {
+#if defined(ESP32) && defined(ENABLE_WIFI_OTA)
+      // The softAP OTA and the WiFi-client OTA share the radio and the global
+      // Update object; don't let the AP path stomp a live download.
+      if (WiFiOTA::isActive()) {
+        strcpy(reply, "ERR: wifi-ota session active");
+        return;
+      }
+#endif
       if (!_board->startOTAUpdate(_prefs->node_name, reply)) {
         strcpy(reply, "Error");
       }
@@ -478,6 +489,31 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       _callbacks->formatRadioStatsReply(reply);
     } else if (sender_timestamp == 0 && memcmp(command, "stats-core", 10) == 0 && (command[10] == 0 || command[10] == ' ')) {
       _callbacks->formatStatsReply(reply);
+    } else if (memcmp(command, "stats-errs", 10) == 0 && (command[10] == 0 || command[10] == ' ')) {
+      _callbacks->formatErrStatsReply(reply);
+    } else if (memcmp(command, "resets", 6) == 0 && (command[6] == 0 || command[6] == ' ')) {
+      _callbacks->formatResetTallyReply(reply);
+#if defined(ESP32) && defined(ENABLE_WIFI_OTA)
+    } else if (memcmp(command, "wifi scan", 9) == 0) {
+      WiFiOTA::scan(reply);
+    } else if (memcmp(command, "start wifi-ota ", 15) == 0) {
+      WiFiOTA::begin(&command[15], reply);
+    } else if (memcmp(command, "ota status", 10) == 0) {
+      WiFiOTA::status(reply);
+    } else if (memcmp(command, "ota abort", 9) == 0) {
+      WiFiOTA::abort(reply);
+#endif
+    } else if (memcmp(command, "clear clients", 13) == 0) {
+      // Reset the per-client login-replay watermarks (last_timestamp is
+      // RAM-only). Cures a live replay-lock — a client whose request
+      // timestamps/tags regressed (e.g. a poller re-seeded after reboot)
+      // being silently dropped by handleLoginReq — without a node reboot.
+      int n = 0;
+      for (int i = 0; i < _acl->getNumClients(); i++) {
+        _acl->getClientByIdx(i)->last_timestamp = 0;
+        n++;
+      }
+      sprintf(reply, "OK - %d client timestamps cleared", n);
     } else {
       strcpy(reply, "Unknown command");
     }

@@ -46,6 +46,19 @@ static uint32_t bsec_last_save_ms    = 0;
 static Adafruit_BME680 BME680(TELEM_WIRE);
 #endif
 
+#ifdef ENV_INCLUDE_BME690
+// BME690 has a different compensation model than BME680/BME688. The BME680
+// library decodes it incorrectly, so it gets a dedicated driver.
+#ifndef TELEM_BME690_ADDRESS
+#define TELEM_BME690_ADDRESS 0x76
+#endif
+#ifndef TELEM_BME690_SEALEVELPRESSURE_HPA
+#define TELEM_BME690_SEALEVELPRESSURE_HPA (1013.25)
+#endif
+#include <helpers/sensors/BME690Sensor.h>
+static BME690Sensor BME690;
+#endif
+
 #ifdef ENV_INCLUDE_BMP085
 #define TELEM_BMP085_SEALEVELPRESSURE_HPA (1013.25)
 #include <Adafruit_BMP085.h>
@@ -113,8 +126,20 @@ LPS22HBClass LPS22HB(*TELEM_WIRE);
 #ifndef TELEM_INA3221_NUM_CHANNELS
 #define TELEM_INA3221_NUM_CHANNELS 3
 #endif
+#ifndef TELEM_INA3221_SAMPLE_INTERVAL_MS
+#define TELEM_INA3221_SAMPLE_INTERVAL_MS 1000
+#endif
 #include <Adafruit_INA3221.h>
 static Adafruit_INA3221 INA3221;
+struct INA3221CachedSample {
+  float voltage;
+  float current;
+  bool valid;
+};
+static INA3221CachedSample ina3221_samples[TELEM_INA3221_NUM_CHANNELS];
+static bool ina3221_channel_enabled[TELEM_INA3221_NUM_CHANNELS];
+static bool ina3221_active = false;
+static uint32_t ina3221_next_sample_ms = 0;
 #endif
 
 #if ENV_INCLUDE_INA219
@@ -275,6 +300,27 @@ static void query_bme680(uint8_t ch, uint8_t, CayenneLPP& lpp) {
 }
 #endif
 
+#ifdef ENV_INCLUDE_BME690
+static uint8_t init_bme690(TwoWire* wire, uint8_t addr) {
+  return BME690.begin(wire, addr) ? 1 : 0;
+}
+static void query_bme690(uint8_t ch, uint8_t, CayenneLPP& lpp) {
+  BME690Sensor::Sample s;
+  if (BME690.readCached(s)) {
+    lpp.addTemperature(ch, s.temperature_c);
+    lpp.addRelativeHumidity(ch, s.humidity_pct);
+    lpp.addBarometricPressure(ch, s.pressure_hpa);
+    lpp.addAltitude(ch, 44330.0f * (1.0f - powf(s.pressure_hpa / (float)TELEM_BME690_SEALEVELPRESSURE_HPA, 0.1903f)));
+    // Only report gas when the heater actually reached a stable burn — an
+    // unstable/invalid conversion yields a constant junk resistance, and an
+    // absent reading is more honest than a fabricated one.
+    if (s.gas_valid && s.heat_stable) {
+      lpp.addGenericSensor(ch, s.gas_resistance_ohm);
+    }
+  }
+}
+#endif
+
 #if ENV_INCLUDE_BME280
 static uint8_t init_bme280(TwoWire* wire, uint8_t addr) {
   if (!BME280.begin(addr, wire)) return 0;
@@ -359,34 +405,63 @@ static void query_lps22hb(uint8_t ch, uint8_t, CayenneLPP& lpp) {
 #endif
 
 #if ENV_INCLUDE_INA3221
+static int8_t ina3221_channel_for_sub(uint8_t sub_ch) {
+  uint8_t seen = 0;
+  for (int i = 0; i < TELEM_INA3221_NUM_CHANNELS; i++) {
+    if (!ina3221_channel_enabled[i]) continue;
+    if (seen == sub_ch) return i;
+    seen++;
+  }
+  return -1;
+}
+
+static void update_ina3221_cache(bool force = false) {
+  if (!ina3221_active) return;
+
+  uint32_t now = millis();
+  if (!force && (int32_t)(now - ina3221_next_sample_ms) < 0) {
+    return;
+  }
+  ina3221_next_sample_ms = now + TELEM_INA3221_SAMPLE_INTERVAL_MS;
+
+  for (int i = 0; i < TELEM_INA3221_NUM_CHANNELS; i++) {
+    if (!ina3221_channel_enabled[i]) continue;
+
+    float v = INA3221.getBusVoltage(i);
+    float c = INA3221.getCurrentAmps(i);
+    if (!isnan(v) && !isnan(c)) {
+      ina3221_samples[i] = { v, c, true };
+    }
+  }
+}
+
 static uint8_t init_ina3221(TwoWire* wire, uint8_t addr) {
   if (!INA3221.begin(addr, wire)) return 0;
   for (int i = 0; i < TELEM_INA3221_NUM_CHANNELS; i++) {
     INA3221.setShuntResistance(i, TELEM_INA3221_SHUNT_VALUE);
+    ina3221_channel_enabled[i] = false;
+    ina3221_samples[i] = { 0.0f, 0.0f, false };
   }
   // Each enabled hardware channel becomes its own telemetry channel.
   uint8_t enabled = 0;
   for (int i = 0; i < TELEM_INA3221_NUM_CHANNELS; i++) {
-    if (INA3221.isChannelEnabled(i)) enabled++;
+    ina3221_channel_enabled[i] = INA3221.isChannelEnabled(i);
+    if (ina3221_channel_enabled[i]) enabled++;
   }
+  ina3221_active = enabled > 0;
+  update_ina3221_cache(true);
   return enabled > 0 ? enabled : 1;
 }
 static void query_ina3221(uint8_t ch, uint8_t sub_ch, CayenneLPP& lpp) {
   // sub_ch is the index of the nth enabled hardware channel.
-  uint8_t seen = 0;
-  for (int i = 0; i < TELEM_INA3221_NUM_CHANNELS; i++) {
-    if (INA3221.isChannelEnabled(i)) {
-      if (seen == sub_ch) {
-        float v = INA3221.getBusVoltage(i);
-        float c = INA3221.getCurrentAmps(i);
-        lpp.addVoltage(ch, v);
-        lpp.addCurrent(ch, c);
-        lpp.addPower(ch, v * c);
-        return;
-      }
-      seen++;
-    }
-  }
+  int8_t hw_ch = ina3221_channel_for_sub(sub_ch);
+  if (hw_ch < 0 || !ina3221_samples[hw_ch].valid) return;
+
+  float v = ina3221_samples[hw_ch].voltage;
+  float c = ina3221_samples[hw_ch].current;
+  lpp.addVoltage(ch, v);
+  lpp.addCurrent(ch, c);
+  lpp.addPower(ch, v * c);
 }
 #endif
 
@@ -637,7 +712,14 @@ static const SensorDef SENSOR_TABLE[] = {
 #if ENV_INCLUDE_SHT4X
   { TELEM_SHT4X_ADDRESS,   "SHT4X",        init_sht4x,    query_sht4x    },
 #endif
-#ifdef ENV_INCLUDE_BME680
+#ifdef ENV_INCLUDE_BME690
+  // BME690 breakouts strap to 0x76 or 0x77. Probe both when an alt is defined.
+  { TELEM_BME690_ADDRESS,  "BME690",       init_bme690,   query_bme690   },
+#ifdef TELEM_BME690_ADDRESS_ALT
+  { TELEM_BME690_ADDRESS_ALT, "BME690",    init_bme690,   query_bme690   },
+#endif
+#endif
+#if defined(ENV_INCLUDE_BME680) && !defined(ENV_INCLUDE_BME690)
   { TELEM_BME680_ADDRESS,  "BME680",       init_bme680,   query_bme680   },
 #endif
 #if ENV_INCLUDE_BME680_BSEC
@@ -986,7 +1068,7 @@ void EnvironmentSensorManager::stop_gps() {
 }
 #endif // ENV_INCLUDE_GPS
 
-#if ENV_INCLUDE_GPS || defined(ENV_INCLUDE_BME680_BSEC)
+#if ENV_INCLUDE_GPS || defined(ENV_INCLUDE_BME680_BSEC) || defined(ENV_INCLUDE_BME690) || ENV_INCLUDE_INA3221
 void EnvironmentSensorManager::loop() {
 
   #if ENV_INCLUDE_GPS
@@ -1040,5 +1122,11 @@ void EnvironmentSensorManager::loop() {
     }
   }
   #endif  // ENV_INCLUDE_BME680_BSEC
+  #ifdef ENV_INCLUDE_BME690
+  BME690.update();
+  #endif
+  #if ENV_INCLUDE_INA3221
+  update_ina3221_cache();
+  #endif
 }
-#endif // ENV_INCLUDE_GPS || ENV_INCLUDE_BME680_BSEC
+#endif // ENV_INCLUDE_GPS || ENV_INCLUDE_BME680_BSEC || ENV_INCLUDE_BME690 || ENV_INCLUDE_INA3221
