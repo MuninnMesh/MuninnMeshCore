@@ -84,6 +84,18 @@ void RadioLibWrapper::resetAGC() {
 }
 
 void RadioLibWrapper::loop() {
+  // RX safety net: if the packet-received (DIO1) edge was missed (flaky IRQ
+  // line), the chip's RX_DONE stays latched and, in continuous-RX, no further
+  // edge arrives for the next packet -> the node goes silently deaf. Detect the
+  // still-latched RX_DONE here and re-assert the software flag so recvRaw()
+  // drains + clears it and re-arms. Only acts on the missed-edge case (when the
+  // ISR already set STATE_INT_READY this is skipped).
+  if (state == STATE_RX && isRxDonePending()) {
+    MESH_DEBUG_PRINTLN("RadioLibWrapper: recovered missed RX_DONE (DIO1 edge)");
+    _n_rx_recovered++;
+    state |= STATE_INT_READY;
+  }
+
   if (state == STATE_RX && _num_floor_samples < NUM_NOISE_FLOOR_SAMPLES) {
     if (!isReceivingPacket()) {
       int rssi = getCurrentRSSI();
@@ -155,6 +167,10 @@ bool RadioLibWrapper::startSendRaw(const uint8_t* bytes, int len) {
   int err = _radio->startTransmit((uint8_t *) bytes, len);
   if (err == RADIOLIB_ERR_NONE) {
     state = STATE_TX_WAIT;
+    // Arm a TX-completion deadline well past the expected airtime, so a missed
+    // TX-done (DIO1) edge can't wedge the state machine in STATE_TX_WAIT forever
+    // (which would stall the outbound queue and leave the RF switch in TX).
+    _tx_deadline = millis() + getEstAirtimeFor(len) * 4 + 2000;
     return true;
   }
   MESH_DEBUG_PRINTLN("RadioLibWrapper: error: startTransmit(%d)", err);
@@ -166,7 +182,17 @@ bool RadioLibWrapper::startSendRaw(const uint8_t* bytes, int len) {
 bool RadioLibWrapper::isSendComplete() {
   if (state & STATE_INT_READY) {
     state = STATE_IDLE;
+    _tx_deadline = 0;
     n_sent++;
+    return true;
+  }
+  // Safety net: TX-done interrupt edge was missed. Recover past the deadline so
+  // the dispatcher advances (onSendFinished -> finishTransmit + onAfterTransmit
+  // re-arms RX) instead of the node going silent.
+  if (state == STATE_TX_WAIT && _tx_deadline != 0 && (int32_t)(millis() - _tx_deadline) > 0) {
+    MESH_DEBUG_PRINTLN("RadioLibWrapper: TX completion timeout, forcing recovery");
+    _n_tx_timeouts++;
+    _tx_deadline = 0;
     return true;
   }
   return false;
@@ -176,6 +202,7 @@ void RadioLibWrapper::onSendFinished() {
   _radio->finishTransmit();
   _board->onAfterTransmit();
   state = STATE_IDLE;
+  _tx_deadline = 0;
 }
 
 bool RadioLibWrapper::isChannelActive() {

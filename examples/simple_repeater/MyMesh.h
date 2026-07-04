@@ -193,6 +193,9 @@ public:
     _cli.savePrefs(_fs);
   }
 
+  void formatErrStatsReply(char* reply) override;
+  void formatResetTallyReply(char* reply) override;
+
   void sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint32_t delay_millis, uint8_t path_hash_size);
 
   // CommonCLICallbacks

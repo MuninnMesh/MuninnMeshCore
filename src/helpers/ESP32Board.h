@@ -151,6 +151,7 @@ public:
   }
 
   bool startOTAUpdate(const char* id, char reply[]) override;
+  void endOTAUpdate();   // stop the OTA AP and return to normal ops
 
   void setInhibitSleep(bool inhibit) {
     inhibit_sleep = inhibit;
